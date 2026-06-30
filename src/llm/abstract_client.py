@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from abc import ABCMeta
 
-class Agent(metaclass=ABCMeta):
+class Client(metaclass=ABCMeta):
     def __init__(self, model, temperature, max_output_tokens, api_key=None, base_url=None):
         self.model = model
         self.temperature = temperature

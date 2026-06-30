@@ -7,10 +7,8 @@ import re
 from dataclasses import asdict
 from typing import Any
 
-from openai import OpenAI
-from llm.factory import get_llm
-
 from app.config import AppConfig
+from global_config import API_KEY_HIGH, API_KEY_MIDDLE, API_KEY_SMALL
 from app.dom_extractor import (
     _detect_topic_family as _dom_detect_topic_family,
     _is_question_repetition as _dom_is_question_repetition,
@@ -219,25 +217,6 @@ def _failed_answer_evaluation(pair: ExtractedPair) -> EvalResult:
         hallucination_risk="high"
     )
 
-def _response_text(response: Any) -> str:
-    direct_text = getattr(response, "output_text", "")
-    if direct_text:
-        return direct_text
-
-    try:
-        dumped = response.model_dump()
-    except Exception:
-        return ""
-
-    output_chunks = dumped.get("output", [])
-    parts: list[str] = []
-    for item in output_chunks:
-        for content in item.get("content", []):
-            text = content.get("text") or content.get("value")
-            if text:
-                parts.append(text)
-    return "\n".join(parts).strip()
-
 
 def _coerce_eval_payload(payload: dict[str, Any]) -> EvalResult:
     fallback = asdict(fallback_evaluation())
@@ -379,12 +358,11 @@ def evaluate_pair(
         logger.info("evaluation completed")
         return build_input_not_verified_evaluation(test_case.question, pair.locale)
 
-    if not config.openai_api_key:
-        logger.warning("OpenAI API key missing; using fallback evaluation")
+    agent = EvaluationAgent()
+    if agent.get_agent() is None:
+        logger.warning("Can not use evaluation agent; using fallback evaluation")
         logger.info("evaluation completed")
         return fallback_evaluation()
-
-    agent = EvaluationAgent()
 
     user_prompt = {
         "page_url": pair.page_url,
@@ -409,9 +387,9 @@ def evaluate_pair(
     }
     
     try:
-        response = agent.invoke([{"type": "input_text", "text": json.dumps(user_prompt, ensure_ascii=False)}])
-        payload = json.loads(_response_text(response))
-        result = _apply_quality_guardrails(test_case, pair, _coerce_eval_payload(json.loads(_response_text(response))))
+        response = agent.invoke(json.dumps(user_prompt, ensure_ascii=False))
+        payload = json.loads(response)
+        result = _apply_quality_guardrails(test_case, pair, _coerce_eval_payload(payload))
         logger.info("evaluation completed")
         return result
     except Exception as exc:

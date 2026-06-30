@@ -1,9 +1,9 @@
-from llm.abstract_agent import Agent
+from llm.abstract_client import Client
 from langchain_openai import ChatOpenAI
 
-class SelfManagedAgent(Agent):
+class SelfManagedClient(Client):
     def __init__(self, model="qwen3.5:9b", temperature=0.1, max_output_tokens=2048, api_key="not-needed", base_url=None):
-        super.__init__(model, temperature, max_output_tokens, api_key, base_url)
+        super(SelfManagedClient, self).__init__(model, temperature, max_output_tokens, api_key, base_url)
 
     def get_llm(self):
         """

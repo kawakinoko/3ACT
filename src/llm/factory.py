@@ -1,14 +1,14 @@
-from llm.gemini import GeminiAgent
-from llm.openai import OpenAIAgent
-from llm.self_managed import SelfManagedAgent
-from llm.abstract_agent import Agent
+from llm.gemini import GeminiClient
+from llm.openai import OpenAIClient
+from llm.self_managed import SelfManagedClient
+from llm.abstract_client import Client
 
 MAP_LLM = {
-    "gemini": GeminiAgent,
-    "openai": OpenAIAgent,
-    "self_managed": SelfManagedAgent
+    "gemini": GeminiClient,
+    "openai": OpenAIClient,
+    "self_managed": SelfManagedClient
 }
-def get_llm(llm="gemini", model="gemini-1.5-flash", temperature=0.1, max_output_tokens=2048, api_key="not-needed", base_url=None) -> Agent:
+def get_llm(llm="gemini", model="gemini-1.5-flash", temperature=0.1, max_output_tokens=2048, api_key="not-needed", base_url=None) -> Client:
     """
     Returns an corresponding llm agent based on the provided llm type:
     Supported type:
@@ -31,4 +31,4 @@ def get_llm(llm="gemini", model="gemini-1.5-flash", temperature=0.1, max_output_
         max_output_tokens=max_output_tokens,
         api_key=api_key,
         base_url=base_url
-    )
+    ).get_llm()

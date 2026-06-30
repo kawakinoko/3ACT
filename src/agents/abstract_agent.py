@@ -1,0 +1,54 @@
+from abc import abstractmethod
+from abc import ABCMeta
+
+from langchain.agents import create_agent as create_langchain_agent
+from llm.factory import get_llm
+from global_config import *
+
+EVALUATION_PROMPT_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prompts", "evaluation_system.md"
+)
+
+class AbstractAgent(metaclass=ABCMeta):
+    def __init__(self):
+        self.agent = None
+
+    def _response_text(self, response) -> str:
+        output_content = response["messages"][-1].content
+            
+        # Clean JSON markdown formatting if present
+        clean_content = output_content.strip()
+        if clean_content.startswith("```"):
+            lines = clean_content.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines[-1].startswith("```"):
+                lines = lines[:-1]
+            clean_content = "\n".join(lines).strip()
+        return clean_content
+
+    def invoke(self, prompt):
+        if self.agent is None:
+            raise RuntimeError("agent is not initialized")
+        message = {"role": "user", "content": prompt}
+        return self._response_text(self.agent.invoke({"messages": [message]}))
+
+    @classmethod
+    def create_agent(cls, llm, model, temperature, max_output_tokens, api_key, base_url, system_prompt, tools=[]):
+        if api_key is None:
+            return None
+        return create_langchain_agent(
+                model=get_llm(
+                    llm=llm,
+                    model=model,
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                    api_key=api_key,
+                    base_url=base_url
+                ),
+                tools=[],
+                system_prompt=system_prompt
+            )
+
+    def get_agent(self):
+        return self.agent
