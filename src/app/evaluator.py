@@ -163,7 +163,7 @@ def _make_eval(
     result.overall_score = _round_score(
         result.correctness_score
         + result.relevance_score
-        + result.completeness_score,
+        + result.completeness_score
         + result.clarity_score
         + result.groundedness_score
     )
@@ -172,7 +172,7 @@ def _make_eval(
 def fallback_evaluation() -> EvalResult:
     """Return the mandated fallback JSON payload as a dataclass."""
 
-    return EvalResult(
+    return _make_eval(
         overall_score=0.0,
         correctness_score=0.0,
         relevance_score=0.0,
@@ -205,7 +205,7 @@ def _invalid_capture_evaluation(pair: ExtractedPair) -> EvalResult:
     return build_input_not_verified_evaluation(reason=pair.reason, fix_suggestion=pair.fix_suggestion)
 
 def _failed_answer_evaluation(pair: ExtractedPair) -> EvalResult:
-    return EvalResult(
+    return _make_eval(
         overall_score=0.0,
         correctness_score=0.0,
         relevance_score=0.0,
@@ -279,7 +279,7 @@ def _apply_quality_guardrails(test_case: TestCase, pair: ExtractedPair, result: 
     answer = _evaluation_answer(pair)
     flags = [normalize_error_flag(flag) for flag in result.flags if normalize_error_flag(flag)]
 
-    if len(answer) > 40:
+    if len(answer) < 40:
         _append_flag(flags, "too_short")
     if getattr(pair, "question_repetition_detected", False) or _dom_is_question_repetition(test_case.question, answer):
         _append_flag(flags, QUESTION_REPETITION)
@@ -287,7 +287,7 @@ def _apply_quality_guardrails(test_case: TestCase, pair: ExtractedPair, result: 
         _append_flag(flags, CARRYOVER_CONTAMINATION)
     if getattr(pair, "truncated_detected", False) or getattr(pair, "truncated_answer_detected", False) or _dom_looks_truncated(answer):
         _append_flag(flags, TRUNCATED_ANSWER)
-    if pair.extraction_soucre == "unknown" or pair.extrasction_confidence < 0.45:
+    if pair.extraction_source == "unknown" or pair.extraction_confidence < 0.45:
         _append_flag(flags, LOW_CONFIDENCE_EXTRACTION)
     if pair.promo_stripped:
         _append_flag(flags, PROMO_OR_REVIEW_LEAK)
@@ -330,8 +330,8 @@ def _apply_quality_guardrails(test_case: TestCase, pair: ExtractedPair, result: 
         keyword_alignment_score=result.keyword_alignment_score,
         hallucination_risk="high" if SPECULATIVE_UNVERIFIED in flags else result.hallucination_risk,
         needs_human_review=result.needs_human_review or bool(flags),
-        reason=pair.reason or "The response was evaluated with automated guardrails.",
-        fix_suggestion=pair.fix_suggestion or "Review the extracted DOM answer and rerun the case if needed",
+        reason=result.reason or "The response was evaluated with automated guardrails.",
+        fix_suggestion=result.fix_suggestion or "Review the extracted DOM answer and rerun the case if needed",
         flags=flags,
     )
     updated.score_breakdown_explanation = result.score_breakdown_explanation or _score_breakdown_text(updated)
@@ -362,10 +362,7 @@ def evaluate_pair(
 
     if pair.status == "failed" and (not pair.answer_raw or pair.input_failure_category == "answer_not_extracted"):
         logger.warning(
-            "Execution failed for case %s (%s); using failed-answer fallback evaluation",
-            pair.case_id,
-            pair.input_failure_category or pair.reason,
-        )
+            "Execution failed for case %s; using failed-answer fallback evaluation", pair.case_id)
         logger.info("evaluation completed")
         return _failed_answer_evaluation(pair)
 
@@ -378,10 +375,7 @@ def evaluate_pair(
         or pair.baseline_menu_detected
     ):
         logger.warning(
-            "Capture verification failed for case %s (status=%s); skipping GPT evaluation",
-            pair.case_id,
-            pair.status,
-        )
+            "Capture verification failed for case %s; skipping GPT evaluation", pair.case_id)
         logger.info("evaluation completed")
         return build_input_not_verified_evaluation(test_case.question, pair.locale)
 
