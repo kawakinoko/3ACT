@@ -4270,7 +4270,7 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
                     active_wait_extended = True
             else:
                 response_incomplete = response_started and (
-                    loading_now or not last_candidate_final or stable_checks > stable_target or not quiet_elapsed
+                    loading_now or not last_candidate_final or stable_checks < stable_target or not quiet_elapsed
                 )
                 break
 
@@ -4348,7 +4348,7 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
                     previous_text = ""
                     _wait_answer_poll_interval(context, interval_sec)
                     continue
-                is_meaningful = len(clean_latest_text) >= MIN_MAIN_ANSWER_LEN and _is_meaningful_answer_text(clean_latest_text)
+
                 is_final_answer_candidate = _is_final_answer_candidate(question, clean_latest_text)
                 growing = bool(previous_text) and clean_latest_text.startswith(previous_text) and len(clean_latest_text) > len(previous_text)
                 runtime.logger.info("[ANSWER] final answer segment chosen: %s", latest_text)
@@ -4371,7 +4371,7 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
                     response_ms = int((now - started) * 1000)
                     if runtime.config.is_speed_mode:
                         runtime.logger.info("[ANSWER] fast answer stabilized true")
-                    else :
+                    else:
                         runtime.logger.info("[ANSWER] answer stabilized true")
                     runtime.logger.info("[ANSWER][RESPONSE_DETECTED] response_ms=%s", response_ms)
                     return AnswerWaitResult(
@@ -4434,7 +4434,6 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
             question_repetition_detected=False,
             truncated_answer_detected=False,
             needs_retry_extraction=False,
-            response_incomplete=False,
         )
     if truncated_answer_detected:
         reason = "truncated answer detected after retry"
@@ -4455,6 +4454,7 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
         question_repetition_detected=question_repetition_detected,
         truncated_answer_detected=truncated_answer_detected,
         needs_retry_extraction=question_repetition_detected or truncated_answer_detected,
+        response_incomplete=False,
     )
 
 
@@ -4620,7 +4620,7 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
         current_url = (page.url or "").strip()
         if (
             runtime.config.reopen_homepage_per_case 
-            or not page.url
+            or not current_url
             or current_url == "about:blank" 
             or current_url.startswith("chrome-error://")
         ):
