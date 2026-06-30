@@ -3,11 +3,6 @@ from abc import ABCMeta
 
 from langchain.agents import create_agent as create_langchain_agent
 from llm.factory import get_llm
-from global_config import *
-
-EVALUATION_PROMPT_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prompts", "evaluation_system.md"
-)
 
 class AbstractAgent(metaclass=ABCMeta):
     def __init__(self):
