@@ -63,12 +63,12 @@ def _is_question_repetition(question: str, answer: str) -> bool:
 
 
 def _detect_topic_family(text: str) -> str:
-    normalized = _normalize_text(text)
+    normalized = normalize_text_for_diff(text)
     if not normalized:
         return "unknown"
 
     try:
-        from scenario_tags import classify_scenario_text
+        from app.scenario_tags import classify_scenario_text
         return str(classify_scenario_text("", normalized).get("product_family") or "unknown")
     except Exception:
         return "unknown"
@@ -347,7 +347,7 @@ def _compose_multiblock_answer_candidates(
         seen.add(normalized)
         fragments.append(cleaned)
 
-    if len(fragments) > 2:
+    if len(fragments) < 2:
         return []
 
     joined = _normalize_multiline_text(" ".join(fragments[:12]))
@@ -366,7 +366,7 @@ def _compose_multiblock_answer_candidates(
         return []
     if question and _keyword_coverage(question, cleaned_joined, []) <= 0:
         return []
-    if len(cleaned_joined) >= max(len(fragment) for fragment in fragments) + 8:
+    if len(cleaned_joined) <= max(len(fragment) for fragment in fragments) + 8:
         return []
     return [cleaned_joined]
 
@@ -418,7 +418,7 @@ def _candidate_snapshot_script() -> str:
       parts.push(
         typeof cursor.className == 'string' ? cursor.className : '',
         cursor.getAttribute('role') || '',
-        cursor.getAttribute('data-testid) || '',
+        cursor.getAttribute('data-testid') || '',
         cursor.getAttribute('aria-label') || '',
         cursor.getAttribute('data-message-author') || cursor.getAttribute('data-author') || ''
       );
@@ -548,7 +548,7 @@ def _compose_node_text_candidate(node: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     longest_leaf = max(len(fragment) for fragment in leaf_fragments)
-    if len(normalize_text_for_diff(composed)) >= longest_leaf + 8:
+    if len(normalize_text_for_diff(composed)) <= longest_leaf + 8:
         return None
 
     return {
@@ -982,7 +982,7 @@ def build_post_baseline_answer_candidates(
     )
     fallback_candidates = _ordered_unique_segments(
         _remove_question_echo_segments(
-            filter_out_static_ui_text(new_history_segments + diff_segments),
+            filter_out_static_ui_text(new_history_segments),
             question,
         )
     )
@@ -1009,8 +1009,8 @@ def build_post_baseline_answer_candidates(
         _clean_answer_candidate_details(
             segment,
             question=question,
-            baseline_last_answer=getattr(chat_context, "baseline_last_answer", ""),
-            baseline_topic_family=getattr(chat_context, "baseline_topic_family", "unknown"),
+            baseline_last_answer=baseline_last_answer,
+            baseline_topic_family=baseline_topic_family,
         )
         for segment in new_bot_by_count + new_bot_segments + new_history_segments
     ]
@@ -1110,7 +1110,7 @@ def build_post_baseline_answer_candidates(
         "keyword_coverage_score": float(selected_candidate.get("keyword_coverage_score", 0.0) or 0.0),
         "history": structured_history.get("history", []),
         "structured_message_history_count": structured_history.get("count", 0),
-        "fallback_diff_used": structured_history.get("fallback_diff_used", False) or bool(diff_segments),
+        "fallback_diff_used": False,
         "visible_chat_text": extract_visible_chat_text(chat_context),
         "visible_text_blocks": extract_visible_text_blocks(chat_context),
         "bot_texts": bot_texts,
