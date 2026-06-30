@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import global_config
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
-
-from app.scenario_tags import RELEASED_PRODUCT_OVERRIDES
 
 
 def _to_bool(value: str | None, default: bool) -> bool:
@@ -69,7 +68,6 @@ class AppConfig:
     answer_stable_interval_sec: float
     enable_video: bool
     enable_trace: bool
-    enable_ocr_fallback: bool
     rubicon_chat_debug: bool
     rubicon_force_activation: bool
     rubicon_disable_sdk: bool
@@ -82,8 +80,6 @@ class AppConfig:
     enable_screenshots: bool = False
     enable_fullpage_screenshots: bool = False
     enable_chatbox_screenshots: bool = False
-    enable_ocr_on_failure: bool = True
-    enable_ocr_always: bool = False
     save_before_send_on_success: bool = False
     save_after_answer_on_success: bool = False
     upload_artifacts_on_success: bool = False
@@ -97,10 +93,13 @@ class AppConfig:
     enable_dom_dump_on_success: bool = False
     fast_context_resolve_rounds: int = 2
     fast_context_resolve_wait_ms: int = 1200
-    fast_answer_timeout_ms: int = 12000
+    fast_answer_timeout_ms: int = 30000
     fast_answer_stable_checks: int = 2
     fast_answer_stable_interval_sec: float = 0.4
-    reopen_homepage_per_case: bool = True
+    answer_active_timeout_ms: int = 60000
+    answer_completion_quiet_ms: int = 2500
+    reopen_homepage_per_case: bool = False
+    reset_conversation_per_case: bool = False
     reinject_font_css_after_open: bool = False
     harness_mode: str = "standard"
     acceptance_min_length: int = 40
@@ -110,7 +109,6 @@ class AppConfig:
     strip_ui_noise: bool = True
     strip_followup_cta: bool = True
     strip_promo_review: bool = True
-    released_product_overrides: list[str] = field(default_factory=lambda: list(RELEASED_PRODUCT_OVERRIDES))
     report_debug_fields_on_success: bool = False
 
     @property
@@ -187,7 +185,7 @@ class AppConfig:
 def load_config(project_root: Path | None = None) -> AppConfig:
     """Load environment variables and create a normalized config object."""
 
-    resolved_root = project_root or Path(__file__).resolve().parent.parent
+    resolved_root = global_config.PROJECT_ROOT
     env_path = resolved_root / ".env"
     if env_path.exists():
         load_dotenv(env_path)
@@ -206,8 +204,6 @@ def load_config(project_root: Path | None = None) -> AppConfig:
         False,
     )
     enable_chatbox_screenshots = _to_bool(_first_env("RUBICON_ENABLE_CHATBOX_SCREENSHOTS"), False)
-    enable_ocr_on_failure = _to_bool(_first_env("RUBICON_ENABLE_OCR_ON_FAILURE", "ENABLE_OCR_FALLBACK"), False)
-    enable_ocr_always = _to_bool(_first_env("RUBICON_ENABLE_OCR_ALWAYS"), False)
     save_before_send_on_success = _to_bool(_first_env("RUBICON_SAVE_BEFORE_SEND_ON_SUCCESS", "RUBICON_BEFORE_SEND_SCREENSHOT"), False)
     save_after_answer_on_success = _to_bool(_first_env("RUBICON_SAVE_AFTER_ANSWER_ON_SUCCESS", "RUBICON_AFTER_ANSWER_SCREENSHOT"), False)
     upload_artifacts_on_success = _to_bool(_first_env("RUBICON_UPLOAD_ARTIFACTS_ON_SUCCESS"), False)
@@ -221,15 +217,17 @@ def load_config(project_root: Path | None = None) -> AppConfig:
     enable_dom_dump_on_success = _to_bool(_first_env("ENABLE_DOM_DUMP_ON_SUCCESS"), False)
     fast_context_resolve_rounds = max(1, int(_first_env("FAST_CONTEXT_RESOLVE_ROUNDS") or "2"))
     fast_context_resolve_wait_ms = max(100, int(_first_env("FAST_CONTEXT_RESOLVE_WAIT_MS") or "1200"))
-    fast_answer_timeout_ms = max(1000, int(_first_env("FAST_ANSWER_TIMEOUT_MS") or "12000"))
+    fast_answer_timeout_ms = max(1000, int(_first_env("FAST_ANSWER_TIMEOUT_MS") or "30000"))
     fast_answer_stable_checks = max(1, int(_first_env("FAST_ANSWER_STABLE_CHECKS") or "2"))
     fast_answer_stable_interval_sec = max(0.1, float(_first_env("FAST_ANSWER_STABLE_INTERVAL_SEC") or "0.4"))
-    reopen_homepage_per_case = _to_bool(_first_env("REOPEN_HOMEPAGE_PER_CASE"), True)
+    answer_active_timeout_ms = max(1000, int(_first_env("ANSWER_ACTIVE_TIMEOUT_MS") or "60000"))
+    answer_competiton_quiet_ms = max(0, int(_first_env("ANSWER_COMPLETION_QUIET_MS") or "2500"))
+    reopen_homepage_per_case = _to_bool(_first_env("REOPEN_HOMEPAGE_PER_CASE"), False)
+    reset_conversation_per_case = _to_bool(_first_env("RUBICON_RESET_CONVERSATION_PER_CASE"), False)
     reinject_font_css_after_open = _to_bool(_first_env("REINJECT_FONT_CSS_AFTER_OPEN"), False)
     harness_mode = str(_first_env("HARNESS_MODE") or "standard").strip().lower()
     if harness_mode not in {"lean", "standard", "debug"}:
         harness_mode = "standard"
-    released_product_overrides = _parse_case_ids(_first_env("RELEASED_PRODUCT_OVERRIDES")) or list(RELEASED_PRODUCT_OVERRIDES)
 
     if run_mode == "speed":
         enable_video = False
@@ -270,7 +268,6 @@ def load_config(project_root: Path | None = None) -> AppConfig:
         answer_stable_interval_sec=float(os.getenv("ANSWER_STABLE_INTERVAL_SEC", "1.0")),
         enable_video=enable_video,
         enable_trace=enable_trace,
-        enable_ocr_fallback=enable_ocr_on_failure or enable_ocr_always,
         rubicon_chat_debug=_to_bool(os.getenv("RUBICON_CHAT_DEBUG"), False),
         rubicon_force_activation=_to_bool(os.getenv("RUBICON_FORCE_ACTIVATION"), True),
         rubicon_disable_sdk=_to_bool(os.getenv("RUBICON_DISABLE_SDK"), False),
@@ -283,8 +280,6 @@ def load_config(project_root: Path | None = None) -> AppConfig:
         enable_screenshots=enable_screenshots,
         enable_fullpage_screenshots=enable_fullpage_screenshots,
         enable_chatbox_screenshots=enable_chatbox_screenshots,
-        enable_ocr_on_failure=enable_ocr_on_failure,
-        enable_ocr_always=enable_ocr_always,
         save_before_send_on_success=save_before_send_on_success,
         save_after_answer_on_success=save_after_answer_on_success,
         upload_artifacts_on_success=upload_artifacts_on_success,
@@ -301,7 +296,10 @@ def load_config(project_root: Path | None = None) -> AppConfig:
         fast_answer_timeout_ms=fast_answer_timeout_ms,
         fast_answer_stable_checks=fast_answer_stable_checks,
         fast_answer_stable_interval_sec=fast_answer_stable_interval_sec,
+        answer_active_timeout_ms=answer_active_timeout_ms,
+        answer_completion_quiet_ms=answer_competiton_quiet_ms,
         reopen_homepage_per_case=reopen_homepage_per_case,
+        reset_conversation_per_case=reset_conversation_per_case,
         reinject_font_css_after_open=reinject_font_css_after_open,
         harness_mode=harness_mode,
         acceptance_min_length=max(1, int(_first_env("ACCEPTANCE_MIN_LENGTH") or "40")),
@@ -311,6 +309,5 @@ def load_config(project_root: Path | None = None) -> AppConfig:
         strip_ui_noise=_to_bool(_first_env("STRIP_UI_NOISE"), True),
         strip_followup_cta=_to_bool(_first_env("STRIP_FOLLOWUP_CTA"), True),
         strip_promo_review=_to_bool(_first_env("STRIP_PROMO_REVIEW"), True),
-        released_product_overrides=released_product_overrides,
         report_debug_fields_on_success=_to_bool(_first_env("REPORT_DEBUG_FIELDS_ON_SUCCESS"), False),
     )

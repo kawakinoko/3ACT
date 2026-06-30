@@ -35,8 +35,7 @@ from app.dom_extractor import (
     normalize_text_for_diff,
 )
 from app.models import BrowserArtifacts, ExtractedPair, ResolvedChatContext, TestCase
-from app.ocr_fallback import extract_text_from_image
-from app.utils import artifact_timestamp, build_locator, compile_regex, first_visible_locator, sanitize_filename, utc_now_timestamp
+from utils.utils import artifact_timestamp, build_locator, compile_regex, first_visible_locator, sanitize_filename, utc_now_timestamp
 
 
 LAUNCHER_CANDIDATES = [
@@ -108,6 +107,13 @@ CHAT_CONFIRM_BUTTON_HINTS = [
     "예",
 ]
 
+CHAT_MODAL_DISMISS_BUTTON_HINTS = [
+    "동의",
+    "확인",
+    "예",
+    "계속",
+]
+
 _ACTIVATION_CANDIDATES = [
     "button:has-text('Start chat')",
     "button:has-text('Chat now')",
@@ -166,10 +172,18 @@ LOADING_TEXT_HINTS = [
     "답변 생성 중",
     "찾고 있습니다",
     "찾아보고 있어요",
+    "확인하고 있습니다",
+    "정보를 확인하고 있습니다",
+    "확인 중",
+    "검색하고 있습니다",
+    "조회하고 있습니다",
+    "준비하고 있습니다",
+    "살펴보고 있습니다",
     "불러오는 중",
     "loading",
     "typing",
 ]
+
 
 POPUP_CLOSE_CANDIDATES = [
     {"type": "role", "role": "button", "name": compile_regex(r"닫기|Close|취소|오늘 그만 보기")},
@@ -355,6 +369,7 @@ class AnswerWaitResult:
     question_repetition_detected: bool = False
     truncated_answer_detected: bool = False
     needs_retry_extraction: bool = False
+    response_incomplete: bool = False
 
 
 @dataclass(slots=True)
@@ -465,17 +480,6 @@ def _is_meaningful_answer_text(text: str) -> bool:
     if len(normalized) >= 16:
         return True
     return any(hint in normalized for hint in MEANINGFUL_ANSWER_HINTS)
-
-
-def _should_run_ocr_fallback(dom_answer: str, new_bot_response_detected: bool, config: AppConfig) -> bool:
-    if config.enable_ocr_always:
-        return True
-    if not config.enable_ocr_on_failure:
-        return False
-    if not new_bot_response_detected:
-        return True
-    normalized = _clean_bot_answer_candidate(dom_answer)
-    return not _is_meaningful_answer_text(normalized)
 
 
 def _context_resolve_rounds(config: AppConfig) -> int:
@@ -1740,6 +1744,43 @@ def _click_button_by_hints(
     return False
 
 
+def dismiss_chat_modals(page: Page, context: ResolvedChatContext | None = None) -> int:
+    runtime = _runtime()
+    scopes: list[tuple[str, Page | Frame]] = []
+    seen: set[int] = set()
+    if context is not None:
+        for scope_name, scope in [(context.scope_name, context.scope), ("page", page)]:
+            key = id(scope)
+            if key in seen:
+                continue
+            seen.add(key)
+            scopes.append((scope_name or "chat_context", scope))
+    for scope_name, scope in _iter_popup_scopes(page):
+        key = id(scope)
+        if key in seen:
+            continue
+        seen.add(key)
+        scopes.append((scope_name, scope))
+    
+    dismissed = 0
+    for scope_name, scope in scopes:
+        if _click_button_by_hints(
+            scope,
+            CHAT_MODAL_DISMISS_BUTTON_HINTS,
+            logger=runtime.logger,
+            log_tag=f"SPR][MODAL_DISMISS:{scope_name}",
+            timeout_ms=1000
+        ):
+            dismissed += 1
+            try:
+                page.wait_for_timeout(500)
+            except Exception:
+                pass
+    if dismissed:
+        runtime.logger.info("[SPR][MODAL_DISMISS][COUNT] %s", dismissed)
+    return dismissed
+
+
 def _end_conversation_via_menu(page: Page, context: ResolvedChatContext) -> bool:
     runtime = _runtime()
     scopes: list[tuple[str, Page | Frame]] = []
@@ -1790,6 +1831,8 @@ def open_chat_widget_or_conversation(page: Page) -> dict[str, Any]:
     sdk_status = get_sprinklr_sdk_status(page)
 
     def maybe_start_new_conversation(method_name: str) -> None:
+        if not runtime.config.reset_conversation_per_case:
+            return
         if runtime.config.rubicon_disable_sdk or not sdk_status.get("has_sprchat"):
             return
         if method_name == "sdk_open_new":
@@ -1807,8 +1850,8 @@ def open_chat_widget_or_conversation(page: Page) -> dict[str, Any]:
     ]
     if not runtime.config.rubicon_disable_sdk and sdk_status.get("has_sprchat"):
         methods.extend([
-            ("sdk_open_new", lambda: page.evaluate("() => window.sprChat('openNewConversation')")),
             ("sdk_open", lambda: page.evaluate("() => window.sprChat('open')")),
+            ("sdk_open_new", lambda: page.evaluate("() => window.sprChat('openNewConversation')")),
         ])
     if sdk_status.get("trigger_exists"):
         methods.append(("trigger_button", lambda: page.locator("#spr-chat__trigger-button").first.click(timeout=2000)))
@@ -1885,6 +1928,17 @@ def ensure_clean_conversation(page: Page, context: ResolvedChatContext) -> Resol
     if not has_stale_messages:
         runtime.logger.info("[SPR][CONVERSATION_RESET][CLEAN]")
         return context
+
+    if not runtime.config.reset_conversation_per_case and context.input_locator is not None:
+        try:
+            if context.input_locator.is_visible(timeout=300) and _input_is_editable(context.input_locator):
+                runtime.logger.info(
+                    "[SPR][CONVERSATION_RESET][SKIP_READY_COMPOSER] stale_count=%s",
+                    len(stale_messages),
+                )
+                return context
+        except Exception as error:
+            runtime.logger.debug("[SPR][CONVERSATION_RESET][READY_CHECK_FAIL] err=%s", error)
 
     runtime.logger.warning(
         "[SPR][CONVERSATION_RESET][DIRTY] count=%s preview=%s",
@@ -2941,6 +2995,21 @@ def _looks_like_main_answer(text: str) -> bool:
     return _looks_like_main_answer_shape(text_n)
 
 
+def _is_final_answer_candidate(question: str, text: str) -> bool:
+    clean_text = _clean_bot_answer_candidate(text)
+    if not clean_text:
+        return False
+    if not _looks_like_main_answer_shape(clean_text):
+        return False
+    if _is_loading_answer_text(clean_text):
+        return False
+    if _dom_is_question_repetition(question, clean_text):
+        return False
+    if _dom_looks_truncated(clean_text):
+        return False
+    return _is_meaningful_answer_text(clean_text) and _has_minimal_question_alignment(question, clean_text)
+
+
 def _dedupe_preserve_order(items: list[str]) -> list[str]:
     seen = set()
     out = []
@@ -3065,6 +3134,28 @@ def extract_last_answer(context: ResolvedChatContext, question: str = "") -> dic
     candidate_texts: list[str] = []
     last_bot_node = _extract_last_bot_message_locator(context)
     runtime = _runtime()
+
+    try:
+        payload = build_post_baseline_answer_candidates(context, question=question)
+        payload_answer = str(payload.get("cleaned_answer") or "")
+        payload_raw = str(payload.get("raw_answer") or payload_answer)
+        if (
+            payload_answer 
+            and _has_minimal_question_alignment(question, payload_answer)
+            and not _dom_looks_truncated(payload_answer)
+            and not _dom_is_question_repetition(question, payload_answer)
+        ):
+            runtime.logger.info("[ANSWER_EXTRACT][BASELINE_SELECTED] len=%s", len(payload_answer))
+            return {
+                "actual_answer": payload_answer,
+                "actual_answer_clean": payload_answer,
+                "answer_raw": payload_raw,
+                "extraction_source": str(payload.get("extraction_source") or "dom_baseline_answer"),
+                "removed_followups": bool(payload.get("cta_stripped", False) or payload.get("promo_stripped", False)),
+                "noise_lines_removed": 0,
+            }
+    except Exception as error:
+        runtime.logger.debug("[ANSWER_EXTRACT][BASELINE_CANDIDATE_FAILED] %s", error)
 
     if last_bot_node is not None:
         try:
@@ -3372,16 +3463,6 @@ def verify_user_echo(context: ResolvedChatContext, question: str) -> bool:
     if visible_text and question_norm in " ".join(str(visible_text).split()):
         logger.info("[INPUT_V2][ECHO][FOUND]")
         return True
-
-    try:
-        full_text = scope.evaluate(
-            "() => { const el = document.body || document.documentElement; return el ? (el.innerText || el.textContent || '') : ''; }"
-        )
-        if full_text and question_norm in " ".join(str(full_text).split()):
-            logger.info("[INPUT_V2][ECHO][FOUND]")
-            return True
-    except Exception:
-        pass
 
     logger.info("[INPUT_V2][ECHO][NOT_FOUND]")
     return False
@@ -3944,6 +4025,7 @@ def trigger_submit(page: Page, context: ResolvedChatContext, question: str) -> t
 
         submit_effect_verified = verify_submit_effect(context, question, input_locator, before_value)
         user_echo_verified = verify_user_message_echo(context, question, runtime.logger)
+
         runtime.logger.info("[SUBMIT] submit method used: %s", method_name)
         if submit_effect_verified:
             return True, method_name, user_echo_verified, after_send_chatbox, after_send_fullpage
@@ -4127,13 +4209,30 @@ def _loading_visible(context: ResolvedChatContext) -> bool:
     return False
 
 
+def _wait_answer_poll_interval(context: ResolvedChatContext, interval_sec: float) -> None:
+    try:
+        if hasattr(context.scope, "wait_for_timeout"):
+            context.scope.wait_for_timeout(int(interval_sec * 1000))
+        else:
+            time.sleep(interval_sec)
+    except Exception as error:
+        if "detached" not in str(error).lower():
+            raise error
+        _runtime().logger.warning("[ANSWER][FRAME_DETACHED_WAIT_FALLBACK] %s", error)
+        time.sleep(interval_sec)
+
+
 def wait_for_answer_completion(context: ResolvedChatContext, question: str = "") -> AnswerWaitResult:
     """Wait until a post-baseline bot answer becomes stable or timeout occurs."""
 
     runtime = _runtime()
     started = time.perf_counter()
     timeout_sec, stable_target, interval_sec = _answer_wait_settings(runtime.config)
-    deadline = started + timeout_sec
+    active_timeout_sec = max(timeout_sec, runtime.config.answer_active_timeout_ms / 1000.0)
+    quiet_sec = max(interval_sec, runtime.config.answer_completion_quiet_ms / 1000.0)
+    initial_deadline = started + timeout_sec
+    active_deadline = started + active_timeout_sec
+    deadline = initial_deadline
     stable_checks = 0
     previous_text = ""
     latest_text = ""
@@ -4143,11 +4242,40 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
     question_repetition_detected = False
     truncated_answer_detected = False
     truncation_retry_used = False
+    response_started = False
+    response_incomplete = False
+    active_wait_extended = False
+    last_candidate_change_at = started
+    last_candidate_final = False
     baseline_last_answer = getattr(context, "baseline_last_answer", "")
     baseline_topic_family = getattr(context, "baseline_topic_family", "unknown")
 
-    while time.perf_counter() < deadline:
+    while True:
+        now = time.perf_counter()
+        if now >= deadline:
+            loading_now = _loading_visible(context)
+            quiet_elapsed = now - last_candidate_change_at >= quiet_sec
+            should_extend = (
+                response_started
+                and now < active_deadline
+                and (loading_now or not last_candidate_final or stable_checks > stable_target or not quiet_elapsed)
+            )
+            if should_extend:
+                deadline = active_deadline
+                if not active_wait_extended:
+                    runtime.logger.info(
+                        "[ANSWER] active response still incomplete; extending wait to %.1fs",
+                        active_timeout_sec,
+                    )
+                    active_wait_extended = True
+            else:
+                response_incomplete = response_started and (
+                    loading_now or not last_candidate_final or stable_checks > stable_target or not quiet_elapsed
+                )
+                break
+
         candidate_data = build_post_baseline_answer_candidates(context, question=question)
+        now = time.perf_counter()
         current_count = int(candidate_data.get("current_bot_count", 0) or 0)
         count_increased = bool(candidate_data.get("bot_count_increased", False))
         new_bot_segments = candidate_data.get("new_bot_segments", [])
@@ -4155,6 +4283,9 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
         filtered_new_bot_segments = candidate_data.get("strict_candidates", [])
         filtered_diff_segments = candidate_data.get("fallback_candidates", [])
         new_text = candidate_data.get("answer", "")
+        loading_now = _loading_visible(context)
+        if count_increased or new_text or new_bot_segments or visible_diff_segments or loading_now:
+            response_started = True
         if candidate_data.get("question_repetition_detected"):
             question_repetition_detected = True
         if count_increased:
@@ -4189,6 +4320,9 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
             if latest_text and _is_loading_answer_text(latest_text):
                 runtime.logger.info("[ANSWER] loading-only candidate ignored: %s", latest_text)
                 latest_text = ""
+                stable_checks = 0
+                previous_text = ""
+                last_candidate_final = False
             if latest_text:
                 if _dom_is_question_repetition(question, latest_text):
                     runtime.logger.info("[ANSWER] question repetition candidate rejected: %s", latest_text)
@@ -4196,10 +4330,7 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
                     latest_text = ""
                     stable_checks = 0
                     previous_text = ""
-                    if hasattr(context.scope, "wait_for_timeout"):
-                        context.scope.wait_for_timeout(int(interval_sec * 1000))
-                    else:
-                        time.sleep(interval_sec)
+                    _wait_answer_poll_interval(context, interval_sec)
                     continue
                 clean_latest_text = _clean_bot_answer_candidate(latest_text)
                 if _dom_looks_truncated(clean_latest_text):
@@ -4209,21 +4340,16 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
                         truncation_retry_used = True
                         stable_checks = 0
                         previous_text = ""
-                        if hasattr(context.scope, "wait_for_timeout"):
-                            context.scope.wait_for_timeout(int(interval_sec * 1000))
-                        else:
-                            time.sleep(interval_sec)
+                        _wait_answer_poll_interval(context, interval_sec)
                         continue
                     runtime.logger.info("[ANSWER] truncated candidate persisted after retry; rejecting success adoption")
                     latest_text = ""
                     stable_checks = 0
                     previous_text = ""
-                    if hasattr(context.scope, "wait_for_timeout"):
-                        context.scope.wait_for_timeout(int(interval_sec * 1000))
-                    else:
-                        time.sleep(interval_sec)
+                    _wait_answer_poll_interval(context, interval_sec)
                     continue
                 is_meaningful = len(clean_latest_text) >= MIN_MAIN_ANSWER_LEN and _is_meaningful_answer_text(clean_latest_text)
+                is_final_answer_candidate = _is_final_answer_candidate(question, clean_latest_text)
                 growing = bool(previous_text) and clean_latest_text.startswith(previous_text) and len(clean_latest_text) > len(previous_text)
                 runtime.logger.info("[ANSWER] final answer segment chosen: %s", latest_text)
                 if clean_latest_text == previous_text:
@@ -4231,9 +4357,22 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
                 else:
                     stable_checks = 1
                     previous_text = clean_latest_text
-                if runtime.config.is_speed_mode and is_meaningful and stable_checks >= stable_target and not growing and not _loading_visible(context):
-                    response_ms = int((time.perf_counter() - started) * 1000)
-                    runtime.logger.info("[ANSWER] fast answer stabilized true")
+                    last_candidate_change_at = now
+                last_candidate_final = bool(is_final_answer_candidate)
+                quiet_elapsed = now - last_candidate_change_at >= quiet_sec
+                loading_now = _loading_visible(context)
+                if (
+                    is_final_answer_candidate 
+                    and stable_checks >= stable_target 
+                    and quiet_elapsed 
+                    and not growing 
+                    and not loading_now
+                ):
+                    response_ms = int((now - started) * 1000)
+                    if runtime.config.is_speed_mode:
+                        runtime.logger.info("[ANSWER] fast answer stabilized true")
+                    else :
+                        runtime.logger.info("[ANSWER] answer stabilized true")
                     runtime.logger.info("[ANSWER][RESPONSE_DETECTED] response_ms=%s", response_ms)
                     return AnswerWaitResult(
                         answer=latest_text,
@@ -4245,27 +4384,30 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
                         truncated_answer_detected=False,
                         needs_retry_extraction=False,
                     )
-                if stable_checks >= stable_target and not _loading_visible(context):
-                    response_ms = int((time.perf_counter() - started) * 1000)
-                    runtime.logger.info("[ANSWER] answer stabilized true")
-                    runtime.logger.info("[ANSWER][RESPONSE_DETECTED] response_ms=%s", response_ms)
-                    return AnswerWaitResult(
-                        answer=latest_text,
-                        response_ms=response_ms,
-                        new_bot_response_detected=True,
-                        baseline_menu_detected=baseline_menu_detected,
-                        reason="",
-                        question_repetition_detected=question_repetition_detected,
-                        truncated_answer_detected=False,
-                        needs_retry_extraction=False,
-                    )
+                if is_final_answer_candidate and stable_checks >= stable_target and not quiet_elapsed:
+                    runtime.logger.info("[ANSWER] final candidate stable; waiting quiet window")
+                if is_final_answer_candidate and stable_checks >= stable_target and loading_now:
+                    runtime.logger.info("[ANSWER] final candidate present but loading indicator is still visible")
+                if stable_checks >= stable_target and not is_final_answer_candidate:
+                    runtime.logger.info("[ANSWER] stable candidate is not final; continuing wait")
 
-        if hasattr(context.scope, "wait_for_timeout"):
-            context.scope.wait_for_timeout(int(interval_sec * 1000))
-        else:
-            time.sleep(interval_sec)
+        _wait_answer_poll_interval(context, interval_sec)
 
     runtime.logger.info("[ANSWER] answer stabilized false")
+    if response_incomplete:
+        reason = "Response did not complete before extraction timeout"
+        runtime.logger.warning("[ANSWER][INCOMPLETE_RESPONSE] %s", reason)
+        return AnswerWaitResult(
+            answer="",
+            response_ms=int((time.perf_counter() - started) * 1000),
+            new_bot_response_detected = True,
+            baseline_menu_detected=baseline_menu_detected,
+            reason=reason,
+            question_repetition_detected=question_repetition_detected,
+            truncated_answer_detected=truncated_answer_detected,
+            needs_retry_extraction=True,
+            response_incomplete=True,
+        )
     recovered_last_answer = extract_last_answer(context, question=question)
     recovered_answer = _select_report_answer(
         "",
@@ -4275,7 +4417,7 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
         baseline_last_answer=baseline_last_answer,
         baseline_topic_family=baseline_topic_family,
     )
-    if recovered_answer and _is_meaningful_answer_text(recovered_answer):
+    if recovered_answer and _is_final_answer_candidate(question, recovered_answer):
         response_ms = int((time.perf_counter() - started) * 1000)
         runtime.logger.info(
             "[ANSWER][TIMEOUT_RECOVERY] source=%s len=%s",
@@ -4292,6 +4434,7 @@ def wait_for_answer_completion(context: ResolvedChatContext, question: str = "")
             question_repetition_detected=False,
             truncated_answer_detected=False,
             needs_retry_extraction=False,
+            response_incomplete=False,
         )
     if truncated_answer_detected:
         reason = "truncated answer detected after retry"
@@ -4394,13 +4537,12 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
     question_repetition_detected = False
     truncated_answer_detected = False
     needs_retry_extraction = False
+    response_incomplete = False
     cta_stripped = False
     promo_stripped = False
     extraction_source = "unknown"
     extraction_source_detail = "unknown"
     extraction_confidence = 0.0
-    ocr_text = ""
-    ocr_confidence = 0.0
     response_ms = 0
     status = "passed"
     reason = ""
@@ -4475,7 +4617,13 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
     submission: SubmissionEvidence | None = None
 
     try:
-        if runtime.config.reopen_homepage_per_case or not page.url:
+        current_url = (page.url or "").strip()
+        if (
+            runtime.config.reopen_homepage_per_case 
+            or not page.url
+            or current_url == "about:blank" 
+            or current_url.startswith("chrome-error://")
+        ):
             open_homepage(page)
         font_fix_applied = inject_korean_font(page)
         dismiss_popups(page)
@@ -4483,6 +4631,7 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
         sdk_status = f"has_sprchat={sdk_info.get('has_sprchat', False)} trigger_exists={sdk_info.get('trigger_exists', False)}"
         bind_availability_probe(page)
         open_result = open_chat_widget_or_conversation(page)
+        dismiss_chat_modals(page)
         if runtime.config.reinject_font_css_after_open:
             font_fix_applied = inject_korean_font(page) or font_fix_applied
         open_method_used = str(open_result.get("open_method", "failed"))
@@ -4516,7 +4665,9 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
                 input_failure_reason = str(retry_error)
 
         if context is not None:
+            dismiss_chat_modals(page, context)
             context = ensure_clean_conversation(page, context)
+            dismiss_chat_modals(page, context)
             input_scope = context.input_scope_name or context.scope_name
             input_scope_name = context.input_scope_name or context.scope_name
             input_selector = context.input_selector
@@ -4703,6 +4854,7 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
             response_ms = wait_result.response_ms
             new_bot_response_detected = wait_result.new_bot_response_detected
             baseline_menu_detected = wait_result.baseline_menu_detected
+            response_incomplete = wait_result.response_incomplete
 
             if _success_stage_enabled("after_answer", runtime.config):
                 (
@@ -4721,7 +4873,24 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
 
             dom_payload = extract_dom_payload(context, None, question=test_case.question, scenario_meta=test_case)
             gate = _assess_dom_payload_acceptance(test_case, dom_payload)
-            if not gate["passed"]:
+            if response_incomplete:
+                runtime.logger.warning("[ANSWER][INCOMPLETE_RESPONSE_BLOCKED] DOM answer will not be accepted")
+                gate = {
+                    "passed": False,
+                    "status": "retry_extraction",
+                    "reason": wait_result.reason or "Response did not complete before extraction timeout",
+                    "fix_suggestion": "Wait until the assistant response is fully rendered before extracting the answer.",
+                    "question_repetition_detected": False,
+                    "truncated_detected": True,
+                    "carryover_detected": False,
+                    "topic_mismatch_detected": False,
+                    "keyword_coverage_low": False,
+                    "keyword_coverage_score": 0.0,
+                    "ui_noise_stripped": False,
+                    "acceptance_status": "rejected",
+                    "primary_error_category": "retry_extraction",
+                }
+            elif not gate["passed"]:
                 runtime.logger.info("[ANSWER] DOM acceptance gate rejected candidate; waiting one more extraction cycle")
                 _wait_one_more_extraction_cycle(context, runtime.config.answer_stable_interval_sec)
                 dom_payload = extract_dom_payload(context, None, question=test_case.question, scenario_meta=test_case)
@@ -4738,14 +4907,24 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
             dom_raw_answer = str(dom_payload.get("raw_answer") or "")
             dom_source = str(dom_payload.get("extraction_source") or "unknown")
             dom_confidence = float(dom_payload.get("extraction_confidence", 0.0) or 0.0)
+            if response_incomplete:
+                dom_answer = ""
+                dom_raw_answer = ""
+                dom_source = "unknown"
+                dom_confidence = 0.0
             selected_report_answer = _select_report_answer(
                 wait_result.answer,
                 dom_answer or str(last_answer_payload.get("actual_answer_clean") or last_answer_payload.get("actual_answer") or ""),
-                new_bot_response_detected,
+                new_bot_response_detected and not response_incomplete,
                 question=test_case.question,
                 baseline_last_answer=context.baseline_last_answer,
                 baseline_topic_family=context.baseline_topic_family,
             )
+            if response_incomplete:
+                selected_report_answer = ""
+            if selected_report_answer and not _is_final_answer_candidate(test_case.question, selected_report_answer):
+                runtime.logger.info("[ANSWER][REPORT_RECOVERED_REJECTED] stable candidate is not final")
+                selected_report_answer = ""
             if selected_report_answer and (not dom_answer or not gate["passed"]):
                 runtime.logger.info(
                     "[ANSWER][REPORT_RECOVERED] source=%s len=%s",
@@ -4848,45 +5027,6 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
                 extraction_source = "dom"
                 extraction_confidence = max(extraction_confidence, dom_confidence, 0.85)
                 runtime.logger.info("DOM extracted")
-            elif _should_run_ocr_fallback(dom_candidate, new_bot_response_detected, runtime.config):
-                _, ocr_target_path = capture_named_artifact(
-                    page,
-                    context,
-                    test_case.id,
-                    "ocr_target",
-                    runtime.config,
-                    case_failed=True,
-                )
-                if ocr_target_path:
-                    after_answer_screenshot_path = after_answer_screenshot_path or ocr_target_path
-                ocr_text, confidence = extract_text_from_image(Path(ocr_target_path), runtime.logger) if ocr_target_path else ("", 0.0)
-                if ocr_text:
-                    answer_raw = ocr_text
-                    raw_answer = ocr_text
-                    ocr_details = _clean_bot_answer_candidate_details(ocr_text)
-                    actual_answer = ocr_details["clean"] or _normalize_answer_text(ocr_text)
-                    actual_answer_clean = actual_answer
-                    cleaned_answer = actual_answer_clean
-                    answer_normalized = actual_answer_clean
-                    answer = actual_answer_clean
-                    extraction_source = "ocr"
-                    extraction_source_detail = "ocr_fallback"
-                    extraction_confidence = confidence
-                    ocr_text = answer_raw
-                    ocr_confidence = confidence
-                    removed_followups = bool(ocr_details.get("removed_followups", False))
-                    noise_lines_removed += int(ocr_details.get("noise_lines_removed", 0) or 0)
-                    runtime.logger.info("OCR fallback used")
-                else:
-                    after_answer_full_screenshot_path, failure_after_answer = capture_named_artifact(
-                        page,
-                        context,
-                        test_case.id,
-                        "after_answer",
-                        runtime.config,
-                        case_failed=True,
-                    )
-                    after_answer_screenshot_path = after_answer_screenshot_path or failure_after_answer
 
             if (cleaned_answer or actual_answer_clean or answer_raw) and extraction_source == "unknown":
                 runtime.logger.warning(
@@ -4899,8 +5039,7 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
             if not gate["passed"]:
                 if (
                     dom_answer
-                    and _is_meaningful_answer_text(dom_answer)
-                    and _has_minimal_question_alignment(test_case.question, dom_answer)
+                    and _is_final_answer_candidate(test_case.question, dom_answer)
                 ):
                     runtime.logger.info("[ANSWER][GATE_OVERRIDE] recovered answer accepted after report selection")
                     gate = {
@@ -5002,7 +5141,7 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
         reason=reason,
         error_message=error_message,
         run_mode=runtime.config.run_mode,
-        fast_path_used=runtime.config.is_speed_mode and input_method_used in {"fill", "keyboard.type"} and not ocr_text,
+        fast_path_used=runtime.config.is_speed_mode and input_method_used in {"fill", "keyboard.type"},
         full_screenshot_path=after_answer_full_screenshot_path or str(artifacts.fullpage_screenshot or ""),
         chat_screenshot_path=after_answer_screenshot_path or str(artifacts.chatbox_screenshot or ""),
         submitted_chat_screenshot_path=after_send_screenshot_path,
@@ -5061,8 +5200,6 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
         baseline_menu_detected=baseline_menu_detected,
         answer_screenshot_paths=answer_screenshot_paths,
         after_answer_multi_page=after_answer_multi_page,
-        ocr_text=ocr_text,
-        ocr_confidence=ocr_confidence,
         structured_message_history_count=structured_message_history_count,
         fallback_diff_used=fallback_diff_used,
         question_repetition_detected=question_repetition_detected,

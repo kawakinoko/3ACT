@@ -10,37 +10,6 @@ from typing import Any, Literal
 from app.error_taxonomy import determine_primary_error_category
 
 
-def _detect_text_language(question: str, locale: str = "") -> str:
-    normalized_locale = (locale or "").lower()
-    if normalized_locale.startswith("ko"):
-        return "ko"
-    if normalized_locale.startswith("en"):
-        return "en"
-    if len(re.findall(r"[가-힣]", question or "")) >= 3:
-        return "ko"
-    return "en"
-
-
-def _looks_english_heavy(text: str) -> bool:
-    lowered = str(text or "").lower()
-    english_words = re.findall(r"\b[a-z]{3,}\b", lowered)
-    return len(english_words) >= 3 and not re.search(r"[가-힣]", lowered)
-
-
-def _looks_korean_heavy(text: str) -> bool:
-    return len(re.findall(r"[가-힣]", str(text or ""))) >= 3
-
-
-def _language_policy_check(question: str, locale: str, reason: str, fix_suggestion: str) -> str:
-    target_language = _detect_text_language(question, locale)
-    combined = " ".join(part for part in [reason, fix_suggestion] if part).strip()
-    if not combined:
-        return "pass"
-    if target_language == "ko":
-        return "pass" if _looks_korean_heavy(combined) else "fail"
-    return "fail" if _looks_korean_heavy(combined) else "pass"
-
-
 def _serialize_cleaning_applied(ui_noise_stripped: bool, cta_stripped: bool, promo_stripped: bool) -> str:
     applied: list[str] = []
     if ui_noise_stripped:
@@ -100,7 +69,7 @@ class ExtractedPair:
     locale: str
     question: str
     answer: str
-    extraction_source: Literal["dom", "ocr", "unknown"]
+    extraction_source: Literal["dom", "unknown"]
     extraction_confidence: float
     response_ms: int
     status: Literal["passed", "retry_extraction", "invalid_answer", "failed", "invalid_capture"]
@@ -182,8 +151,6 @@ class ExtractedPair:
     baseline_menu_detected: bool = False
     answer_screenshot_paths: list[str] = field(default_factory=list)
     after_answer_multi_page: bool = False
-    ocr_text: str = ""
-    ocr_confidence: float = 0.0
     structured_message_history_count: int = 0
     fallback_diff_used: bool = False
     question_repetition_detected: bool = False
@@ -352,12 +319,7 @@ class RunResult:
         evaluation_fix_suggestion = self.evaluation.fix_suggestion or self.pair.fix_suggestion
         serialized_flags = self._serialize_flags(self.evaluation.flags)
         final_answer = self.pair.final_answer
-        language_policy = _language_policy_check(
-            self.pair.question,
-            self.pair.locale,
-            evaluation_reason,
-            evaluation_fix_suggestion,
-        )
+        language_policy = "delegated_to_orchestrator"
         error_category = determine_primary_error_category(
             self.evaluation.flags,
             extraction_status=self.pair.extraction_status,
@@ -416,8 +378,6 @@ class RunResult:
             "promo_stripped": self.pair.promo_stripped,
             "removed_followups": self.pair.removed_followups,
             "noise_lines_removed": self.pair.noise_lines_removed,
-            "ocr_text": self.pair.ocr_text,
-            "ocr_confidence": self.pair.ocr_confidence,
             "structured_message_history_count": self.pair.structured_message_history_count,
             "fallback_diff_used": self.pair.fallback_diff_used,
             "ui_noise_stripped": self.pair.ui_noise_stripped,

@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,7 +14,7 @@ from typing import Any
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
 
 from app.config import AppConfig
-from app.utils import ensure_parent
+from utils.utils import ensure_parent
 
 
 _CHAT_STATE_COOKIE_PREFIXES = (
@@ -116,21 +115,18 @@ class BrowserManager:
         self._xvfb_process: subprocess.Popen[str] | None = None
 
     def _ensure_display(self) -> None:
-        """Start Xvfb automatically when headed mode runs without a DISPLAY."""
+        """Require a visible Linux display for headed browser runs."""
 
         if self.config.headless or os.environ.get("DISPLAY"):
             return
 
-        display = ":99"
-        self.logger.warning("DISPLAY is not set; starting Xvfb on %s", display)
-        self._xvfb_process = subprocess.Popen(
-            ["Xvfb", display, "-screen", "0", "1440x1200x24", "-nolisten", "tcp"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True,
+        if os.name == "nt" or sys.platform == "darwin":
+            return
+        raise RuntimeError(
+            "HEADLESS=false requires a visible Linux display. "
+            "Set DISPLAY to an active desktop/noVNC session, run scripts/start_vnc_browser.sh and export its DISPLAY, "
+            "or set HEADLESS=true for non-visual execution."
         )
-        os.environ["DISPLAY"] = display
-        time.sleep(1)
 
     def start(self) -> None:
         """Start Playwright and launch Chromium."""
@@ -138,6 +134,7 @@ class BrowserManager:
         self._ensure_display()
         self._playwright = sync_playwright().start()
         try:
+            self.logger.info("launching Chromium headless=%s", self.config.headless)
             self._browser = self._playwright.chromium.launch(headless=self.config.headless)
         except Exception as exc:
             message = str(exc)
@@ -218,11 +215,3 @@ class BrowserManager:
                 self.logger.warning("playwright stop failed: %s", error)
             finally:
                 self._playwright = None
-        if self._xvfb_process is not None:
-            try:
-                self._xvfb_process.terminate()
-                self._xvfb_process.wait(timeout=5)
-            except Exception as error:
-                self.logger.warning("xvfb shutdown failed: %s", error)
-            finally:
-                self._xvfb_process = None

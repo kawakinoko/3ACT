@@ -1,6 +1,6 @@
-import os
 from langchain.agents import create_agent
-from factory import get_llm
+from llm.factory import get_llm
+from global_config import *
 
 EVALUATION_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prompts", "evaluation_system.md"
@@ -13,9 +13,12 @@ class EvaluationAgent:
                 prompt_content = f.read()
             self.agent = create_agent(
                 model=get_llm(
-                    model_name="gemini-2.5-flash",
+                    llm=LLM_MIDDLE,
+                    model=MODEL_MIDDLE,
                     temperature=0.1,
-                    max_tokens=4096
+                    max_output_tokens=4096,
+                    api_key=API_KEY_MIDDLE,
+                    base_url=BASE_URL_MIDDLE
                 ),
                 tools=[],
                 system_prompt=prompt_content

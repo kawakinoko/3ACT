@@ -8,7 +8,7 @@ from typing import Any
 
 from app.config import AppConfig
 from app.models import HarnessSummary, RunResult
-from app.utils import write_json
+from utils.utils import write_json
 
 
 def write_reports(
@@ -419,7 +419,6 @@ def _build_summary(
     invalid_captures = sum(1 for item in run_results if item.pair.status == "invalid_capture")
     failures = sum(1 for item in run_results if item.pair.status == "failed")
     dom_successes = sum(1 for item in run_results if item.pair.extraction_source == "dom")
-    ocr_used = sum(1 for item in run_results if item.pair.extraction_source == "ocr")
     human_review = sum(1 for item in run_results if item.evaluation.needs_human_review)
     new_response_detected = sum(1 for item in run_results if item.pair.new_bot_response_detected)
     avg_score = mean(item.evaluation.overall_score for item in run_results) if run_results else 0.0
@@ -446,7 +445,6 @@ def _build_summary(
         f"- failed 수: {failures}",
         f"- invalid_capture 수: {invalid_captures}",
         f"- DOM 추출 성공 수: {dom_successes}",
-        f"- OCR fallback 사용 수: {ocr_used}",
         f"- baseline 이후 새 응답 감지 수: {new_response_detected}",
         f"- 평균 overall score: {avg_score:.2f}",
         f"- human review 필요 건수: {human_review}",

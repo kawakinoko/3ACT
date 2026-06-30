@@ -1,102 +1,97 @@
-"""Scenario metadata enrichment for harness-oriented execution."""
-
+"""Scenario metadata enrichment through the category sub-agent."""
 from __future__ import annotations
 
+import json
+import global_config
 from dataclasses import replace
+from functools import lru_cache
 
 from app.models import TestCase
 
-RELEASED_PRODUCT_OVERRIDES = [
-    "갤럭시 s26",
-    "갤럭시 s26 울트라",
-    "갤럭시 s26 플러스",
-    "galaxy s26",
-    "galaxy s26 ultra",
-    "galaxy s26 plus",
-]
-
-PRODUCT_FAMILY_RULES = {
-    "phone": ["갤럭시 s26", "galaxy s26", "울트라", "플러스", "스마트폰"],
-    "laptop": ["갤럭시 북", "book", "노트북"],
-    "earbuds": ["버즈", "buds", "이어버드"],
-    "watch": ["워치", "watch"],
-    "tv": ["oled tv", "neo qled", "qled", "tv"],
-    "laundry": ["세탁", "건조", "콤보", "washer", "dryer"],
-    "refrigerator": ["냉장고", "family hub", "fridge", "refrigerator"],
-    "monitor": ["오디세이", "odyssey", "monitor", "모니터"],
-    "ring": ["갤럭시 링", "galaxy ring", "ring"],
+DEFAULT_CATEGORY_RESULT = {
+    "scenario_type": "spec",
+    "product_family": "unknown",
+    "released_override": False,
+    "policy_tags": []
 }
 
-NOISE_SENSITIVE_HINTS = [
-    "비교",
-    "차이",
-    "추천",
-    "혜택",
-    "가격",
-    "재고",
-    "family hub",
-]
+VALID_SCENARIO_TYPES = {"spec", "comparison", "policy_sensitive", "noise_sensitive"}
 
-POLICY_SENSITIVE_HINTS = [
-    "가격",
-    "혜택",
-    "재고",
-    "구매 가능",
-    "출시",
-    "availability",
-]
+def _has_middle_agent_key() -> bool:
+    return bool(global_config.API_KEY_MIDDLE)
 
 
-def infer_product_family(test_case: TestCase) -> str:
-    haystack = " ".join([test_case.category, test_case.question, *test_case.expected_keywords]).lower()
-    for family, keywords in PRODUCT_FAMILY_RULES.items():
-        if any(keyword in haystack for keyword in keywords):
-            return family
-    return "unknown"
+def _extract_json_object(text: str) -> dict:
+    cleaned = str(text or "").strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+    
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(cleaned[start : end + 1])
+        raise
 
+def _normalize_category_payload(payload: dict) -> dict:
+    scenario_type = str(payload.get("scenario_type") or "spec").strip()
+    if scenario_type not in VALID_SCENARIO_TYPES:
+        scenario_type = "spec"
 
-def infer_scenario_type(test_case: TestCase) -> str:
-    question = test_case.question.lower()
-    if any(token in question for token in ["비교", "차이", "compare"]):
-        return "comparison"
-    if any(token in question for token in POLICY_SENSITIVE_HINTS):
-        return "policy_sensitive"
-    if any(token in question for token in NOISE_SENSITIVE_HINTS):
-        return "noise_sensitive"
-    return "spec"
+    product_family = str(payload.get("product_family") or "unknown").strip() or "unknown"
+    policy_tags = payload.get("policy_tags") or []
+    if not isinstance(policy_tags, list):
+        policy_tags = []
 
+    return {
+        "scenario_type": scenario_type,
+        "product_family": product_family,
+        "released_override": bool(payload.get("released_override", False)),
+        "policy_tags": [str(tag).strip() for tag in policy_tags if str(tag.strip())]
+    }
 
-def infer_released_override(test_case: TestCase) -> bool:
-    question = test_case.question.lower()
-    category = test_case.category.lower()
-    if any(keyword in question for keyword in RELEASED_PRODUCT_OVERRIDES):
-        return True
-    return "s26" in category
+@lru_cache(maxsize=512)
+def classify_scenario_text(category: str, question: str, expected_keywords: tuple[str, ...]=()):
+    """Classify scenario metadata with the dedicated category sub-agent."""
+    if not _has_middle_agent_key():
+        return dict(DEFAULT_CATEGORY_RESULT)
 
+    try:
+        from agents.sub_agents.category_agent import CategoryAgent
 
-def infer_policy_tags(test_case: TestCase) -> list[str]:
-    question = test_case.question.lower()
-    tags: list[str] = []
-    if infer_released_override(test_case):
-        tags.append("released_override")
-    if any(token in question for token in ["비교", "차이", "compare"]):
-        tags.append("comparison")
-    if any(token in question for token in POLICY_SENSITIVE_HINTS):
-        tags.append("policy_sensitive")
-    if any(token in question for token in NOISE_SENSITIVE_HINTS):
-        tags.append("noise_sensitive")
-    return tags
-
+        agent = CategoryAgent()
+        result = agent.invoke(
+            json.dumps(
+                {
+                    "category": category,
+                    "question": question,
+                    "expected_keywords": list(expected_keywords)
+                },
+                ensure_ascii=False
+            )
+        )
+        content = result["messages"][-1].content
+        return _normalize_category_payload(_extract_json_object(content))
+    except Exception:
+        return dict(DEFAULT_CATEGORY_RESULT)
 
 def enrich_test_case_metadata(test_case: TestCase) -> TestCase:
-    scenario_type = infer_scenario_type(test_case)
-    product_family = infer_product_family(test_case)
-    released_override = infer_released_override(test_case)
-    policy_tags = infer_policy_tags(test_case)
+    metadata = classify_scenario_text(
+        test_case.category,
+        test_case.question,
+        tuple(test_case.expected_keywords)
+    )
     return replace(
         test_case,
-        scenario_type=scenario_type,
-        product_family=product_family,
-        released_override=released_override,
-        policy_tags=policy_tags,
+        scenario_type=metadata["scenario_type"],
+        product_family=metadata["product_family"],
+        released_override=metadata["released_override"],
+        policy_tags=metadata["policy_tags"],
     )
