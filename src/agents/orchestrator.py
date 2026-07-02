@@ -1,7 +1,5 @@
 from agents.abstract_agent import AbstractAgent
 from pathlib  import Path
-from llm.factory import get_llm
-from tools.classify_question_category import classify_question_category
 from tools.run_usecases import run_usecases
 from tools.evaluate_responses import evaluate_responses
 from tools.read_file import read_file
@@ -24,7 +22,6 @@ class OrchestratorAgent(AbstractAgent):
                 system_prompt=prompt_content,
                 tools=[
                     read_file,
-                    classify_question_category,
                     run_usecases,
                     evaluate_responses
                 ]

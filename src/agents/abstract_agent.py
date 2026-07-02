@@ -10,7 +10,10 @@ class AbstractAgent(metaclass=ABCMeta):
 
     def _response_text(self, response) -> str:
         output_content = response["messages"][-1].content
-            
+        print("===============================output===============================")
+        print(output_content)
+        if isinstance(output_content, list):
+            output_content = output_content[-1]["text"]
         # Clean JSON markdown formatting if present
         clean_content = output_content.strip()
         if clean_content.startswith("```"):
@@ -26,7 +29,10 @@ class AbstractAgent(metaclass=ABCMeta):
         if self.agent is None:
             raise RuntimeError("agent is not initialized")
         message = {"role": "user", "content": prompt}
-        return self._response_text(self.agent.invoke({"messages": [message]}))
+        print(f"{type(self).__name__}: {message}")
+        response = self.agent.invoke({"messages": [message]})
+        print(f"{type(self).__name__}: {response}")
+        return self._response_text(response)
 
     @classmethod
     def create_agent(cls, llm, model, temperature, max_output_tokens, api_key, base_url, system_prompt, tools=[]):
@@ -41,7 +47,7 @@ class AbstractAgent(metaclass=ABCMeta):
                     api_key=api_key,
                     base_url=base_url
                 ),
-                tools=[],
+                tools=tools,
                 system_prompt=system_prompt
             )
 

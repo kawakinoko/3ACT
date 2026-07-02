@@ -15,7 +15,6 @@ from app.acceptance import assess_answer_acceptance
 from app.config import AppConfig
 from app.dom_extractor import (
     _clean_answer_candidate_details as _dom_clean_answer_candidate_details,
-    _detect_topic_family as _dom_detect_topic_family,
     _is_stale_or_invalid_candidate as _dom_is_stale_or_invalid_candidate,
     _is_question_repetition as _dom_is_question_repetition,
     _looks_truncated as _dom_looks_truncated,
@@ -2789,11 +2788,6 @@ def _has_minimal_question_alignment(question: str, answer: str) -> bool:
     if not normalized_answer or _dom_is_question_repetition(question, normalized_answer):
         return False
 
-    question_family = _dom_detect_topic_family(question)
-    answer_family = _dom_detect_topic_family(normalized_answer)
-    if question_family != "unknown" and answer_family != "unknown" and question_family != answer_family:
-        return False
-
     keywords = _extract_alignment_keywords(question)[:6]
     if not keywords:
         return True
@@ -3291,10 +3285,7 @@ def _select_report_answer(
             lowered_clean = clean_text.lower()
             if specific_keywords and not any(keyword in lowered_clean for keyword in specific_keywords):
                 return ""
-            question_family = _dom_detect_topic_family(question)
-            answer_family = _dom_detect_topic_family(clean_text)
-            if question_family != "unknown" and answer_family != "unknown" and question_family != answer_family:
-                return ""
+
             if _dom_is_stale_or_invalid_candidate(
                 question,
                 raw_text,
@@ -3405,7 +3396,6 @@ def capture_baseline_bot_snapshot(context: ResolvedChatContext) -> list[str]:
     context.baseline_bot_messages = baseline_messages
     context.baseline_bot_count = len(baseline_messages)
     context.baseline_last_answer = baseline_messages[-1] if baseline_messages else ""
-    context.baseline_topic_family = _dom_detect_topic_family(context.baseline_last_answer)
     _runtime().logger.info("[ANSWER] baseline bot count: %s", context.baseline_bot_count)
     _runtime().logger.info("[ANSWER] baseline bot texts count: %s", len(context.baseline_bot_messages))
     return baseline_messages

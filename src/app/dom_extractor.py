@@ -62,18 +62,6 @@ def _is_question_repetition(question: str, answer: str) -> bool:
     return nq in na and len(na) <= len(nq) * 1.4
 
 
-def _detect_topic_family(text: str) -> str:
-    normalized = normalize_text_for_diff(text)
-    if not normalized:
-        return "unknown"
-
-    try:
-        from app.scenario_tags import classify_scenario_text
-        return str(classify_scenario_text("", normalized).get("product_family") or "unknown")
-    except Exception:
-        return "unknown"
-
-
 def _looks_truncated(answer: str) -> bool:
     normalized = _normalize_text(answer)
     if not normalized:
@@ -111,23 +99,7 @@ def _is_stale_or_invalid_candidate(
     if normalized_baseline and normalized_answer == normalized_baseline:
         return True
 
-    question_family = _detect_topic_family(question)
-    answer_family = _detect_topic_family(answer_text)
-    baseline_family = baseline_topic_family if baseline_topic_family != "unknown" else _detect_topic_family(baseline_last_answer)
-    topic_mismatch = (
-        question_family != "unknown"
-        and answer_family != "unknown"
-        and question_family != answer_family
-    )
-    question_repetition = _is_question_repetition(question, raw_answer) or _is_question_repetition(question, cleaned_answer)
-    baseline_family_match = (
-        baseline_family != "unknown"
-        and answer_family != "unknown"
-        and baseline_family == answer_family
-        and question_family != "unknown"
-        and question_family != baseline_family
-    )
-    return baseline_family_match or (question_repetition and topic_mismatch)
+    return False
 
 
 def _extract_question_keywords(text: str) -> list[str]:
@@ -201,13 +173,6 @@ def _clean_answer_candidate_details(
     elif cleaned and len(cleaned) < MIN_CLEAN_ANSWER_LEN:
         cleaned = ""
 
-    topic_family = _detect_topic_family(cleaned or raw_answer)
-    question_family = _detect_topic_family(question)
-    topic_mismatch_detected = (
-        question_family != "unknown"
-        and topic_family != "unknown"
-        and question_family != topic_family
-    )
     keyword_coverage_score = _keyword_coverage(question, cleaned or raw_answer, [])
     carryover_detected = _is_stale_or_invalid_candidate(
         question,
@@ -227,8 +192,8 @@ def _clean_answer_candidate_details(
         "promo_stripped": promo_stripped,
         "carryover_detected": carryover_detected,
         "keyword_coverage_score": keyword_coverage_score,
-        "topic_family": topic_family,
-        "topic_mismatch_detected": topic_mismatch_detected,
+        "topic_family": "",
+        "topic_mismatch_detected": False,
     }
 
 
@@ -237,7 +202,8 @@ def _normalize_multiline_text(text: str) -> str:
 
 
 def _strip_meta_text(text: str, question: str = "") -> str:
-    return _clean_answer_candidate_details(text, question=question)["cleaned_answer"]
+    #return _clean_answer_candidate_details(text, question=question)["cleaned_answer"]
+    return _normalize_multiline_text(text)
 
 
 def is_static_ui_text(text: str) -> bool:
@@ -860,7 +826,6 @@ def collect_bot_candidates(
     )
 
     expected_keywords = list(getattr(scenario_meta, "expected_keywords", []) or [])
-    question_family = _detect_topic_family(question)
     candidates: list[CandidateAnswer] = []
     for index, segment in enumerate(merged_segments, start=1):
         details = _clean_answer_candidate_details(
@@ -873,13 +838,12 @@ def collect_bot_candidates(
         raw = details.get("raw_answer", "")
         text_for_scoring = cleaned or raw
         keyword_coverage = _keyword_coverage(question, text_for_scoring, expected_keywords)
-        topic_family = details.get("topic_family", "unknown")
-        topic_family_match = question_family == "unknown" or topic_family == "unknown" or question_family == topic_family
+        topic_family = ""
+        topic_family_match = True
         length_score = min(len(cleaned or raw), 240) / 24.0
         completeness_score = 1.0 if cleaned and not details.get("truncated_detected", False) else 0.0
         score = length_score
         score += keyword_coverage * 10.0
-        score += 1.5 if topic_family_match else -3.0
         score += completeness_score * 2.0
         if details.get("question_repetition_detected", False):
             score -= 12.0

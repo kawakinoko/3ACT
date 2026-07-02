@@ -1,3 +1,4 @@
+from tools.classify_category import classify_text_category
 from agents.abstract_agent import AbstractAgent
 from global_config import *
 
@@ -17,7 +18,7 @@ class EvaluationAgent(AbstractAgent):
                 api_key=API_KEY_MIDDLE,
                 base_url=BASE_URL_MIDDLE,
                 system_prompt=prompt_content,
-                tools=[]
+                tools=[classify_text_category]
             )
         except FileNotFoundError as e:
             raise e

@@ -13,7 +13,7 @@ class SelfManagedClient(Client):
         return ChatOpenAI(
             model=self.model,
             temperature=self.temperature,
-            max_output_tokens=self.max_output_tokens,
+            max_tokens=self.max_output_tokens,
             base_url=self.base_url,
             api_key=self.api_key
         )

@@ -39,7 +39,7 @@ def parse_usecases(input_str: str) -> list[dict]:
         
         lower_line = line_str.lower()
         parts = line_str.split(":", 1)
-        if lower_line.startswith("query:", "prompt:"):
+        if lower_line.startswith("query:") or lower_line.startswith("prompt:"):
             if "query" in current_usecase:
                 usecases.append(current_usecase)
                 current_usecase = {}

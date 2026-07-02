@@ -15,11 +15,6 @@ DEFAULT_CATEGORY_RESULT = {
     "policy_tags": []
 }
 
-VALID_SCENARIO_TYPES = {"spec", "comparison", "policy_sensitive", "noise_sensitive"}
-
-def _has_middle_agent_key() -> bool:
-    return bool(global_config.API_KEY_MIDDLE)
-
 
 def _extract_json_object(text: str) -> dict:
     cleaned = str(text or "").strip()
@@ -42,8 +37,6 @@ def _extract_json_object(text: str) -> dict:
 
 def _normalize_category_payload(payload: dict) -> dict:
     scenario_type = str(payload.get("scenario_type") or "spec").strip()
-    if scenario_type not in VALID_SCENARIO_TYPES:
-        scenario_type = "spec"
 
     product_family = str(payload.get("product_family") or "unknown").strip() or "unknown"
     policy_tags = payload.get("policy_tags") or []
@@ -58,36 +51,30 @@ def _normalize_category_payload(payload: dict) -> dict:
     }
 
 @lru_cache(maxsize=512)
-def classify_scenario_text(category: str, question: str, expected_keywords: tuple[str, ...]=()):
+def classify_scenario_text(question: str):
     """Classify scenario metadata with the dedicated category sub-agent."""
-    if not _has_middle_agent_key():
-        return dict(DEFAULT_CATEGORY_RESULT)
 
     try:
         from agents.sub_agents.category_agent import CategoryAgent
 
         agent = CategoryAgent()
+        if agent.get_agent() is None:
+            return dict(DEFAULT_CATEGORY_RESULT)
+
         result = agent.invoke(
             json.dumps(
                 {
-                    "category": category,
                     "question": question,
-                    "expected_keywords": list(expected_keywords)
                 },
                 ensure_ascii=False
             )
         )
-        content = result["messages"][-1].content
-        return _normalize_category_payload(_extract_json_object(content))
+        return _normalize_category_payload(_extract_json_object(result))
     except Exception:
         return dict(DEFAULT_CATEGORY_RESULT)
 
 def enrich_test_case_metadata(test_case: TestCase) -> TestCase:
-    metadata = classify_scenario_text(
-        test_case.category,
-        test_case.question,
-        tuple(test_case.expected_keywords)
-    )
+    metadata = classify_scenario_text(test_case.question)
     return replace(
         test_case,
         scenario_type=metadata["scenario_type"],

@@ -13,6 +13,9 @@ def evaluate_responses(runs_json: str) -> str:
     Evaluates each run result in the JSON by comparing the actual chatbot response
     with the expected response using the Evaluation Agent.
     """
+    print("======================runs_json=============================")
+    print(runs_json)
+    print("======================runs_json=============================")
     try:
         runs = json.loads(runs_json)
     except Exception as e:
@@ -47,26 +50,14 @@ def evaluate_responses(runs_json: str) -> str:
         eval_prompt = f"""
 Evaluate the following chatbot QA response:
 - User Question: {query}
-- Expected Reference Response: {expected}
 - Actual Chatbot Response: {actual}
         """
         
         try:
             print(f"📊 Evaluating case {idx + 1}/{len(runs)}: '{query[:50]}'")
-            agent_result = eval_agent.invoke(eval_prompt)
-            output_content = agent_result["messages"][-1].content
+            output_content = eval_agent.invoke(eval_prompt)
             
-            # Clean JSON markdown formatting if present
-            clean_content = output_content.strip()
-            if clean_content.startswith("```"):
-                lines = clean_content.splitlines()
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines[-1].startswith("```"):
-                    lines = lines[:-1]
-                clean_content = "\n".join(lines).strip()
-                
-            eval_data = json.loads(clean_content)
+            eval_data = json.loads(output_content)
             run["evaluation"] = eval_data
         except Exception as e:
             run["evaluation"] = {
