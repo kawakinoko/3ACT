@@ -202,8 +202,7 @@ def _normalize_multiline_text(text: str) -> str:
 
 
 def _strip_meta_text(text: str, question: str = "") -> str:
-    #return _clean_answer_candidate_details(text, question=question)["cleaned_answer"]
-    return _normalize_multiline_text(text)
+    return _clean_answer_candidate_details(text, question=question)["cleaned_answer"]
 
 
 def is_static_ui_text(text: str) -> bool:
