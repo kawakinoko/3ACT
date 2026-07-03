@@ -10,7 +10,6 @@ from typing import Any
 from app.config import AppConfig
 from global_config import API_KEY_HIGH, API_KEY_MIDDLE, API_KEY_SMALL
 from app.dom_extractor import (
-    _detect_topic_family as _dom_detect_topic_family,
     _is_question_repetition as _dom_is_question_repetition,
     _looks_truncated as _dom_looks_truncated,
 )

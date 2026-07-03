@@ -36,7 +36,8 @@ class AbstractAgent(metaclass=ABCMeta):
 
     @classmethod
     def create_agent(cls, llm, model, temperature, max_output_tokens, api_key, base_url, system_prompt, tools=[]):
-        if api_key is None:
+        if api_key is None or len(api_key.strip()) == 0:
+            print(f"Warning: API key is not set. Skipping agent creation.")
             return None
         return create_langchain_agent(
                 model=get_llm(
