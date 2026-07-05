@@ -335,13 +335,13 @@ def evaluate_pair(
 
     if pair.status == "invalid_capture":
         logger.warning("Capture invalid for case %s; using invalid-capture evaluation", pair.case_id)
-        logger.info("evaluation compelted")
+        logger.info("evaluation completed")
         return _invalid_capture_evaluation(pair)
 
     if pair.status == "failed" and (not pair.answer_raw or pair.input_failure_category == "answer_not_extracted"):
         logger.warning(
             "Execution failed for case %s; using failed-answer fallback evaluation", pair.case_id)
-        logger.info("evaluation completed")
+        logger.info(f"evaluation completed")
         return _failed_answer_evaluation(pair)
 
     if (
@@ -389,7 +389,7 @@ def evaluate_pair(
         response = agent.invoke(json.dumps(user_prompt, ensure_ascii=False))
         payload = json.loads(response)
         result = _apply_quality_guardrails(test_case, pair, _coerce_eval_payload(payload))
-        logger.info("evaluation completed")
+        logger.info(f"evaluation completed | scores: overall={result.score_scale_0_10 if hasattr(result, 'score_scale_0_10') else 'N/A'}")
         return result
     except Exception as exc:
         logger.exception("OpenAI evaluation failed: %s", exc)

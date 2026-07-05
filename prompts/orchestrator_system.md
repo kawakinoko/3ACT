@@ -12,3 +12,4 @@ Workflow:
 2. If you successfully read the file content from the previous step, call `run_usecase` with the file content. The file content is a concatenated string of usecases.
 3. Once you have the results, call `evaluate_responses` to grade the answers against their expected responses.
 4. Finally, organize the results into a concise, readable summary. Report the overall success rate, scores, and any critical failures (such as factual inaccuracies, truncation, or UI leaks).
+5. **IMPORTANT**: Don't ever evaluate the content of the actual chatbot response. Trust the `evaluate_responses` tool to do that.
