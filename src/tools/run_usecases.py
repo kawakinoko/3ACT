@@ -8,7 +8,9 @@ from app.config import load_config
 from app.logger import create_logger
 from app.models import TestCase
 from app.samsung_rubicon import configure_runtime, run_single_case
+from agents.sub_agents.category_agent import CategoryAgent
 from global_config import PROJECT_ROOT
+
 
 class RunUsecasesInput(BaseModel):
     """Schema for run_usecases tool input"""
@@ -99,7 +101,20 @@ def run_usecases(usecases_input: str) -> str:
                 forbidden_keywords=[],
                 expected_response=usecase["expected_response"]
             )
-            
+
+            # Classify category via CategoryAgent
+            try:
+                cat_agent = CategoryAgent()
+                if cat_agent.get_agent() is not None:
+                    cat_response = cat_agent.invoke(usecase["query"])
+                    cat_data = json.loads(cat_response)
+                    product_family = cat_data.get("product_family", "")
+                    scenario_type = cat_data.get("scenario_type", "")
+                    if product_family and product_family != "etc":
+                        test_case.category = f"{product_family}/{scenario_type}" if scenario_type else product_family
+            except Exception as cat_err:
+                logger.warning("CategoryAgent failed for case %s: %s", test_case.id, cat_err)
+
             print(f"Usecase {index + 1}/{len(usecases)}: {test_case.question}")
             session = browser_manager.new_case_session(test_case.id)
             try:

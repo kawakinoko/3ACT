@@ -167,6 +167,8 @@ class ExtractedPair:
     extractor_version: str = ""
     harness_version: str = ""
     message_history: list[str] = field(default_factory=list)
+    related_products: list[str] = field(default_factory=list)
+    related_questions: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.final_answer:

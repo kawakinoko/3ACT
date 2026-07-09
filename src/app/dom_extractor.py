@@ -11,36 +11,235 @@ from utils.utils import build_locator, ensure_parent
 
 
 MESSAGE_LIKE_SELECTORS = [
-    "[data-message-author]",
-    "[data-author]",
-    "[role='log'] article",
-    "[role='log'] li",
-    "[role='list'] article",
-    "[role='list'] li",
-    "[aria-live] article",
-    "[aria-live] li",
-    "article[class*='message' i]",
-    "div[class*='message' i]",
-    "div[class*='chat' i]",
-    "div[class*='bubble' i]",
-    "div[class*='assistant' i]",
-    "div[class*='agent' i]",
-    "section[class*='message' i]",
+    "div[class='chatbot-message-payload']"
 ]
 
 USER_MESSAGE_SELECTORS = [
-    ".user-message",
-    "[data-message-author='user']",
-    "[data-author='user']",
-    "[data-author='customer']",
-    "[class*='user' i][class*='message' i]",
-    "[class*='customer' i][class*='message' i]",
-    "[class*='outgoing' i]",
-    "[class*='sent' i]",
+    "div[class='chat-message-user']"
 ]
 
 MIN_CLEAN_ANSWER_LEN = 6
-EXTRACTOR_VERSION = "dom-extractor-v3.0"
+EXTRACTOR_VERSION = "dom-extractor-v3.1"
+
+# ─── Structured Samsung Chatbot DOM extraction ────────────────────────────────
+
+_STRUCTURED_CHAT_EXTRACT_JS = r"""
+(nodes) => {
+  const normalize = (t) => (t || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const textOf = (el) => normalize(el ? (el.innerText || el.textContent || '') : '');
+
+  // Collect all direct text leaves under a root, excluding sub-roots.
+  const leafTexts = (root, excludeRoots) => {
+    if (!root) return [];
+    const excl = new Set(excludeRoots || []);
+    const result = [];
+    const walk = (node) => {
+      if (excl.has(node)) return;
+      if (node.nodeType === Node.TEXT_NODE) {
+        const t = normalize(node.textContent);
+        if (t) result.push(t);
+        return;
+      }
+      for (const child of node.childNodes) walk(child);
+    };
+    for (const child of root.childNodes) walk(child);
+    return result;
+  };
+
+  const parseNode = (node) => {
+    let answerParts = [];
+    let relatedProducts = [];
+    let relatedQuestions = [];
+
+    // Identify all elements that should be classified as related questions or suggestions
+    const suggestionEls = new Set();
+    const suggestionsSelectors = [
+      '.app-message-suggestions',
+      '[class*="message-suggestions"]',
+      '[class*="suggestion"]',
+      '[data-lc-type="TEXT_POST_BACK"]',
+      'button[class*="chip"]',
+      '[role="button"][class*="chip"]',
+      '[class*="related-query"]',
+      '[class*="related-question"]'
+    ];
+    for (const sel of suggestionsSelectors) {
+      for (const root of node.querySelectorAll(sel)) {
+        suggestionEls.add(root);
+        for (const child of root.querySelectorAll('*')) suggestionEls.add(child);
+      }
+    }
+
+    // Exclude reaction buttons and timestamps from the answer as well
+    const uiChromeEls = new Set();
+    const uiSelectors = [
+      '[class*="reaction"]', '[class*="feedback"]', '[class*="like-btn"]',
+      '[class*="dislike"]', '[class*="thumb"]', '[class*="vote"]',
+      '[class*="timestamp"]', '[class*="time-label"]', '[class*="chat-time"]',
+      '[class*="message-time"]', 'time'
+    ];
+    for (const sel of uiSelectors) {
+      for (const root of node.querySelectorAll(sel)) {
+        uiChromeEls.add(root);
+        for (const child of root.querySelectorAll('*')) uiChromeEls.add(child);
+      }
+    }
+    const uiPatterns = [
+      /^(?:오전|오후)\s*\d{1,2}:\d{2}$/,
+      /^\d{1,2}:\d{2}(?:\s?[AP]M)?$/i,
+      /^(?:좋아요|싫어요|싫어함|like|dislike)(?:[\s|/]+(?:좋아요|싫어요|싫어함|like|dislike))?$/i,
+      /^(?:오늘|어제|그저께|today|yesterday)$/i,
+      /^(?:이어서 물어보세요|더 알아보기|자세히 보기|see more|load more)$/i,
+    ];
+    for (const el of node.querySelectorAll('span, div, p, button')) {
+      if (uiChromeEls.has(el)) continue;
+      const t = textOf(el);
+      if (uiPatterns.some(rx => rx.test(t))) {
+        uiChromeEls.add(el);
+        for (const child of el.querySelectorAll('*')) uiChromeEls.add(child);
+      }
+    }
+
+    // Extract all related questions from the suggestion elements
+    for (const el of suggestionEls) {
+      // Pick leaf-like elements or direct buttons to get the actual text
+      if (el.tagName === 'BUTTON' || el.tagName === 'A' || el.getAttribute('role') === 'button' || el.classList.contains('chip') || el.getAttribute('data-lc-type') === 'TEXT_POST_BACK') {
+        const t = textOf(el);
+        if (t) relatedQuestions.push(t);
+      }
+    }
+
+    // ── Structure 1: Sprinklr spr_richText layout ──
+    const richTextEl = node.querySelector('#spr_richText');
+    if (richTextEl) {
+      // Build answer from richText content, excluding suggestion / UI chrome sections
+      answerParts = leafTexts(richTextEl, [...suggestionEls, ...uiChromeEls]);
+
+      // Collect carousel items AFTER richTextEl (related products)
+      const siblings = Array.from(node.children);
+      const richIdx = siblings.indexOf(richTextEl);
+      const after = siblings.slice(richIdx + 1);
+
+      for (const sib of after) {
+        const title = (sib.getAttribute('title') || '').toLowerCase();
+        if (title === 'carousel' || sib.querySelector('[title="Carousel"]') || sib.classList.contains('c-b-ai-pc-carousel')) {
+          const items = sib.querySelectorAll('[class*="carousel-item"], [class*="product"], button, a');
+          if (items.length) {
+            for (const item of items) {
+              const t = textOf(item);
+              if (t) relatedProducts.push(t);
+            }
+          } else {
+            const t = textOf(sib);
+            if (t) relatedProducts.push(t);
+          }
+        }
+      }
+    } else {
+      // ── Structure 2: Angular ai-content layout ──
+      const aiContent = node.querySelector('.ai-content, [class*="ai-content"]');
+      const carousel = node.querySelector('.c-b-ai-pc-carousel, [class*="ai-pc-carousel"], [class*="carousel"]');
+
+      if (aiContent) {
+        answerParts = leafTexts(aiContent, [carousel, ...suggestionEls, ...uiChromeEls].filter(Boolean));
+      } else {
+        answerParts = leafTexts(node, [carousel, ...suggestionEls, ...uiChromeEls].filter(Boolean));
+      }
+
+      if (carousel) {
+        const items = carousel.querySelectorAll('button, a, [class*="item"], [class*="product"]');
+        if (items.length) {
+          for (const item of items) {
+            const t = textOf(item);
+            if (t) relatedProducts.push(t);
+          }
+        } else {
+          const t = textOf(carousel);
+          if (t) relatedProducts.push(t);
+        }
+      }
+    }
+
+    // Deduplicate
+    const dedup = (arr) => [...new Set(arr.map(s => s.trim()).filter(Boolean))];
+
+    return {
+      answer: dedup(answerParts).join('\n'),
+      related_products: dedup(relatedProducts),
+      related_questions: dedup(relatedQuestions),
+    };
+  };
+
+
+  return nodes.map(parseNode);
+}
+"""
+
+
+def _extract_structured_pairs_from_locator(locator: Any) -> list[dict[str, Any]]:
+    """Run the structured extraction JS over all nodes matched by *locator*."""
+    try:
+        results = locator.evaluate_all(_STRUCTURED_CHAT_EXTRACT_JS)
+        if isinstance(results, list):
+            return [r for r in results if isinstance(r, dict)]
+    except Exception:
+        pass
+    return []
+
+
+def extract_structured_chat_response(chat_context: ResolvedChatContext) -> dict[str, Any]:
+    """Extract the latest bot answer, related_products and related_questions.
+
+    Tries each known bot-message selector in order and picks the last non-empty
+    parsed node (most recent message).
+    """
+    selectors = [
+        "div[class='chatbot-message-payload']",
+        "div[class='chat-message-payload']",
+        "app-message-bubble",
+        ".chatbot-message-payload",
+        ".chat-message-payload",
+        "div[class*='chatbot-message']",
+        "div[class*='chat-message']",
+        ".ai-content",
+        ".message-bubble",
+        ".bot-message",
+        "app-message-bubble",
+    ]
+    all_parsed: list[dict[str, Any]] = []
+    for selector in selectors:
+        try:
+            loc = chat_context.scope.locator(selector)
+            if loc.count() > 0:
+                parsed = _extract_structured_pairs_from_locator(loc)
+                if parsed:
+                    all_parsed.extend(parsed)
+                    break
+        except Exception:
+            continue
+
+    # Fallback: if selectors did not match, evaluate the entire scope node itself (the last bot message)
+    if not all_parsed:
+        try:
+            parsed = _extract_structured_pairs_from_locator(chat_context.scope)
+            if parsed:
+                all_parsed.extend(parsed)
+        except Exception:
+            pass
+
+    # Filter to entries that have answer text (skip empty user-echo nodes)
+    answer_entries = [p for p in all_parsed if p.get("answer") and p["answer"].strip()]
+    if answer_entries:
+        last = answer_entries[-1]
+        return {
+            "answer": last.get("answer", ""),
+            "related_products": last.get("related_products", []),
+            "related_questions": last.get("related_questions", []),
+        }
+    return {"answer": "", "related_products": [], "related_questions": []}
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def normalize_text_for_diff(text: str) -> str:
@@ -213,9 +412,26 @@ def is_static_ui_text(text: str) -> bool:
         return True
     if re.fullmatch(r"[\W_]+", normalized):
         return True
+    # English timestamps: HH:MM AM/PM
     if re.fullmatch(r"[0-9]{1,2}:[0-9]{2}(?:\s?[AP]M)?", normalized, re.IGNORECASE):
         return True
+    # Korean timestamps: 오전/오후 H:MM or 오후 5:47
+    if re.fullmatch(r"(?:오전|오후)\s*[0-9]{1,2}:[0-9]{2}", normalized):
+        return True
+    # Date-only stamps
     if re.fullmatch(r"[0-9]{4}[./-][0-9]{1,2}[./-][0-9]{1,2}", normalized):
+        return True
+    # Korean date labels like '오늘', '어제', '그저께'
+    if normalized in {"오늘", "어제", "그저께", "today", "yesterday"}:
+        return True
+    # Single-word reaction buttons
+    if normalized in {"좋아요", "싫어요", "싫어함", "like", "dislike"}:
+        return True
+    # Compound reaction labels like '좋아요 싫어함' or '좋아요 싫어요'
+    if re.fullmatch(r"(?:좋아요|싫어요|싫어함|like|dislike)[\s|/]+(?:좋아요|싫어요|싫어함|like|dislike)", normalized, re.IGNORECASE):
+        return True
+    # Navigation prompts that are always UI chrome
+    if normalized in {"이어서 물어보세요", "더 알아보기", "자세히 보기", "see more", "load more"}:
         return True
     return False
 
@@ -392,8 +608,75 @@ def _candidate_snapshot_script() -> str:
     }
     return parts.filter(Boolean).join(' ');
   };
+
+  // Build exclusion set: all elements inside carousel, suggestion, reaction, and timestamp sub-trees.
+  const excludedEls = new Set();
+  const carouselSelectors = [
+    '[title="Carousel"]',
+    '.c-b-ai-pc-carousel',
+    '[class*="ai-pc-carousel"]',
+    '[class*="carousel"]',
+    '.app-message-suggestions',
+    '[class*="message-suggestions"]',
+    // Reaction / feedback containers
+    '[class*="reaction"]',
+    '[class*="feedback"]',
+    '[class*="like-btn"]',
+    '[class*="dislike"]',
+    '[class*="thumb"]',
+    '[class*="vote"]',
+    // Timestamp containers
+    '[class*="timestamp"]',
+    '[class*="time-label"]',
+    '[class*="chat-time"]',
+    '[class*="message-time"]',
+    'time',
+  ];
+  for (const sel of carouselSelectors) {
+    for (const root of node.querySelectorAll(sel)) {
+      excludedEls.add(root);
+      for (const child of root.querySelectorAll('*')) excludedEls.add(child);
+    }
+  }
+  // Also exclude individual TEXT_POST_BACK elements.
+  for (const el of node.querySelectorAll('[data-lc-type="TEXT_POST_BACK"]')) {
+    excludedEls.add(el);
+    for (const child of el.querySelectorAll('*')) excludedEls.add(child);
+  }
+  // Exclude elements whose entire text is a Korean/English timestamp or reaction label.
+  const uiOnlyPatterns = [
+    /^(?:오전|오후)\s*\d{1,2}:\d{2}$/,
+    /^\d{1,2}:\d{2}(?:\s?[AP]M)?$/i,
+    /^(?:좋아요|싫어요|싫어함|like|dislike)(?:[\s|/]+(?:좋아요|싫어요|싫어함|like|dislike))?$/i,
+    /^(?:오늘|어제|그저께|today|yesterday)$/i,
+    /^(?:이어서 물어보세요|더 알아보기|자세히 보기|see more|load more)$/i,
+  ];
+  const norm = (t) => (t || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+  for (const el of node.querySelectorAll('span, div, p, button')) {
+    if (excludedEls.has(el)) continue;
+    const t = norm(el.innerText || el.textContent || '');
+    if (uiOnlyPatterns.some(rx => rx.test(t))) {
+      excludedEls.add(el);
+      for (const child of el.querySelectorAll('*')) excludedEls.add(child);
+    }
+  }
+
+  // Build answer-only text by walking the node's text nodes, skipping excluded sub-trees.
+  const answerTextParts = [];
+  const walkForText = (n) => {
+    if (excludedEls.has(n)) return;
+    if (n.nodeType === Node.TEXT_NODE) {
+      const t = normalize(n.textContent);
+      if (t) answerTextParts.push(t);
+      return;
+    }
+    for (const child of n.childNodes) walkForText(child);
+  };
+  walkForText(node);
+  const answerOnlyText = answerTextParts.join(' ').replace(/\s+/g, ' ').trim();
+
   const rawDescendants = [node, ...node.querySelectorAll('*')]
-    .filter((el) => visible(el))
+    .filter((el) => !excludedEls.has(el) && visible(el))
     .map((el, index) => {
       const text = normalize(el.innerText || el.textContent || '');
       if (!text) return null;
@@ -434,7 +717,7 @@ def _candidate_snapshot_script() -> str:
     };
   });
   return {
-    wrapperText: normalize(node.innerText || node.textContent || ''),
+    wrapperText: answerOnlyText,
     descendants,
     className: typeof node.className === 'string' ? node.className : '',
     role: node.getAttribute('role') || '',
@@ -1189,37 +1472,48 @@ def extract_dom_payload(
     question: str = "",
     scenario_meta: TestCase | None = None,
 ) -> dict[str, Any]:
-    candidate_data = build_post_baseline_answer_candidates(chat_context, question=question, scenario_meta=scenario_meta)
     html_fragment_path = save_html_fragment(chat_context, fragment_path)
+
+    # Extract structured response (answer + related_products + related_questions)
+    structured = extract_structured_chat_response(chat_context)
+    structured_answer = structured.get("answer", "") or ""
+    cleaned_answer = normalize_text_for_diff(structured_answer)
+
+    # Detect any basic flags on the cleaned answer
+    question_repetition_detected = _is_question_repetition(question, cleaned_answer)
+    truncated_detected = bool(cleaned_answer) and _looks_truncated(cleaned_answer)
+
     return {
-        "success": bool(candidate_data["cleaned_answer"]),
-        "answer": candidate_data["cleaned_answer"],
-        "raw_answer": candidate_data["raw_answer"],
-        "cleaned_answer": candidate_data["cleaned_answer"],
-        "extraction_source": candidate_data.get("extraction_source", "unknown"),
-        "extraction_confidence": float(candidate_data.get("extraction_confidence", 0.0) or 0.0),
-        "question_repetition_detected": candidate_data["question_repetition_detected"],
-        "truncated_detected": candidate_data["truncated_detected"],
-        "ui_noise_stripped": bool(candidate_data.get("ui_noise_stripped", False)),
-        "cta_stripped": candidate_data["cta_stripped"],
-        "promo_stripped": candidate_data["promo_stripped"],
-        "carryover_detected": bool(candidate_data.get("carryover_detected", False)),
-        "stale_answer_detected": bool(candidate_data.get("stale_answer_detected", False)),
-        "candidate_count": int(candidate_data.get("candidate_count", 0) or 0),
-        "selected_candidate_rank": int(candidate_data.get("selected_candidate_rank", 0) or 0),
-        "keyword_coverage_score": float(candidate_data.get("keyword_coverage_score", 0.0) or 0.0),
-        "history": candidate_data["history"],
-        "structured_message_history_count": candidate_data["structured_message_history_count"],
-        "fallback_diff_used": candidate_data["fallback_diff_used"],
-        "visible_chat_text": candidate_data["visible_chat_text"],
-        "visible_text_blocks": candidate_data["visible_text_blocks"],
-        "new_bot_segments": candidate_data["new_bot_segments"],
-        "new_history_segments": candidate_data["new_history_segments"],
-        "diff_segments": candidate_data["diff_segments"],
-        "current_bot_count": candidate_data["current_bot_count"],
-        "bot_count_increased": candidate_data["bot_count_increased"],
-        "strict_candidates": candidate_data["strict_candidates"],
-        "fallback_candidates": candidate_data["fallback_candidates"],
-        "all_candidates": candidate_data["all_candidates"],
+        "success": bool(cleaned_answer),
+        "answer": cleaned_answer,
+        "raw_answer": structured_answer,
+        "cleaned_answer": cleaned_answer,
+        "related_products": structured.get("related_products", []),
+        "related_questions": structured.get("related_questions", []),
+        "extraction_source": "structured_dom_parser",
+        "extraction_confidence": 1.0 if cleaned_answer else 0.0,
+        "question_repetition_detected": question_repetition_detected,
+        "truncated_detected": truncated_detected,
+        "ui_noise_stripped": True,
+        "cta_stripped": False,
+        "promo_stripped": False,
+        "carryover_detected": False,
+        "stale_answer_detected": False,
+        "candidate_count": 1 if cleaned_answer else 0,
+        "selected_candidate_rank": 1 if cleaned_answer else 0,
+        "keyword_coverage_score": float(_keyword_coverage(question, cleaned_answer, [])),
+        "history": [],
+        "structured_message_history_count": 0,
+        "fallback_diff_used": False,
+        "visible_chat_text": "",
+        "visible_text_blocks": [],
+        "new_bot_segments": [],
+        "new_history_segments": [],
+        "diff_segments": [],
+        "current_bot_count": 1 if cleaned_answer else 0,
+        "bot_count_increased": True,
+        "strict_candidates": [],
+        "fallback_candidates": [],
+        "all_candidates": [],
         "html_fragment_path": html_fragment_path,
     }

@@ -32,6 +32,7 @@ from app.dom_extractor import (
     filter_out_static_ui_text,
     looks_like_chat_history_dump,
     normalize_text_for_diff,
+    save_html_fragment,
 )
 from app.models import BrowserArtifacts, ExtractedPair, ResolvedChatContext, TestCase
 from utils.utils import artifact_timestamp, build_locator, compile_regex, first_visible_locator, sanitize_filename, utc_now_timestamp
@@ -3171,6 +3172,18 @@ def extract_last_answer(context: ResolvedChatContext, question: str = "") -> dic
                 tag_name = ""
             if tag_name == "button":
                 continue
+            # Skip elements inside carousel or suggestion sub-trees
+            try:
+                in_excluded = block.evaluate(
+                    "el => !!el.closest('[title=\"Carousel\"], .c-b-ai-pc-carousel, "
+                    "[class*=\"ai-pc-carousel\"], [class*=\"carousel\"], "
+                    ".app-message-suggestions, [class*=\"message-suggestions\"], "
+                    '[data-lc-type="TEXT_POST_BACK"])'
+                )
+                if in_excluded:
+                    continue
+            except Exception:
+                pass
             try:
                 text = _normalize_answer_text(block.inner_text(timeout=1000))
             except Exception:
@@ -3179,7 +3192,57 @@ def extract_last_answer(context: ResolvedChatContext, question: str = "") -> dic
                 candidate_texts.append(text)
 
         try:
-            bubble_text = _normalize_answer_text(last_bot_node.inner_text(timeout=2000))
+            # Use answer-only text (innerText minus carousel/suggestions) for the bubble text
+            bubble_text_raw = last_bot_node.evaluate(
+                r"""el => {
+  const excl = new Set();
+  const selectors = [
+    '[title="Carousel"]', '.c-b-ai-pc-carousel', '[class*="ai-pc-carousel"]',
+    '[class*="carousel"]', '.app-message-suggestions', '[class*="message-suggestions"]',
+    '[data-lc-type="TEXT_POST_BACK"]',
+    '[class*="reaction"]', '[class*="feedback"]', '[class*="like-btn"]',
+    '[class*="dislike"]', '[class*="thumb"]', '[class*="vote"]',
+    '[class*="timestamp"]', '[class*="time-label"]', '[class*="chat-time"]',
+    '[class*="message-time"]', 'time',
+  ];
+  for (const sel of selectors) {
+    for (const node of el.querySelectorAll(sel)) {
+      excl.add(node);
+      for (const child of node.querySelectorAll('*')) excl.add(child);
+    }
+  }
+  // Also exclude elements whose entire visible text is a UI-only label
+  const uiOnlyPatterns = [
+    /^(?:오전|오후)\s*\d{1,2}:\d{2}$/,
+    /^\d{1,2}:\d{2}(?:\s?[AP]M)?$/i,
+    /^(?:좋아요|싫어요|싫어함|like|dislike)(?:[\s|/]+(?:좋아요|싫어요|싫어함|like|dislike))?$/i,
+    /^(?:오늘|어제|그저께|today|yesterday)$/i,
+    /^(?:이어서 물어보세요|더 알아보기|자세히 보기|see more|load more)$/i,
+  ];
+  const normT = (t) => (t || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+  for (const elem of el.querySelectorAll('span, div, p, button')) {
+    if (excl.has(elem)) continue;
+    const t = normT(elem.innerText || elem.textContent || '');
+    if (uiOnlyPatterns.some(rx => rx.test(t))) {
+      excl.add(elem);
+      for (const child of elem.querySelectorAll('*')) excl.add(child);
+    }
+  }
+  const parts = [];
+  const walk = (n) => {
+    if (excl.has(n)) return;
+    if (n.nodeType === Node.TEXT_NODE) {
+      const t = normT(n.textContent);
+      if (t) parts.push(t);
+      return;
+    }
+    for (const child of n.childNodes) walk(child);
+  };
+  walk(el);
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
+}"""
+            )
+            bubble_text = _normalize_answer_text(bubble_text_raw or "")
             if bubble_text:
                 candidate_texts.append(bubble_text)
         except Exception:
@@ -4631,15 +4694,9 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
             input_failure_category = "sdk_not_available" if not sdk_info.get("has_sprchat") else "no_chat_open"
             input_failure_reason = str(open_result.get("open_error") or "Failed to open chat widget")
 
-        opened_full_screenshot_path, opened_chat_screenshot_path = _capture_stage(
-            page,
-            None,
-            test_case.id,
-            runtime.current_case_timestamp,
-            "opened",
-            runtime.config,
-            runtime.logger,
-        )
+        # Screenshots disabled — record empty paths
+        opened_full_screenshot_path = ""
+        opened_chat_screenshot_path = ""
 
         try:
             context = resolve_chat_context(page)
@@ -4664,23 +4721,10 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
             input_candidate_score = context.input_candidate_score
             input_candidate_logs = list(context.input_candidate_logs)
             input_candidates_debug = "\n".join(input_candidate_logs)
-            opened_full_screenshot_path, opened_chat_screenshot_path = _capture_stage(
-                page,
-                context,
-                test_case.id,
-                runtime.current_case_timestamp,
-                "opened",
-                runtime.config,
-                runtime.logger,
-            )
-            _, opened_footer_screenshot_path = capture_named_artifact(
-                page,
-                context,
-                test_case.id,
-                "opened_footer",
-                runtime.config,
-                case_failed=False,
-            )
+            # Screenshots disabled — record empty paths
+            opened_full_screenshot_path = ""
+            opened_chat_screenshot_path = ""
+            opened_footer_screenshot_path = ""
 
             ranked_candidates = collect_ranked_input_candidates(context, preferred_scope=context.scope_name)
             top_candidate_placeholder, top_candidate_aria = _top_candidate_texts(ranked_candidates)
@@ -4732,14 +4776,7 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
                 input_ready_wait_result = "ready_already_present"
                 runtime.logger.info("[INPUT] no transition-disabled top candidate; continue normal submit flow")
 
-            _, opened_footer_screenshot_path = capture_named_artifact(
-                page,
-                context,
-                test_case.id,
-                "opened_footer",
-                runtime.config,
-                case_failed=False,
-            )
+            opened_footer_screenshot_path = opened_footer_screenshot_path or ""
 
             submission = submit_question(
                 page,
@@ -4796,27 +4833,7 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
             if not input_failure_category:
                 input_failure_category = "no_editable_candidate_after_transition"
                 input_failure_reason = "Submit flow never reached a verified editable input candidate"
-            if context is not None:
-                _, failure_capture_path = capture_named_artifact(
-                    page,
-                    context,
-                    test_case.id,
-                    "opened_footer",
-                    runtime.config,
-                    case_failed=True,
-                )
-                opened_footer_screenshot_path = opened_footer_screenshot_path or failure_capture_path
-            else:
-                opened_full_screenshot_path, opened_chat_screenshot_path = _capture_stage(
-                    page,
-                    None,
-                    test_case.id,
-                    runtime.current_case_timestamp,
-                    "failure_state",
-                    runtime.config,
-                    runtime.logger,
-                    case_failed=True,
-                )
+            # Screenshots disabled
             status = _status_from_failure_category(input_failure_category)
             reason = input_failure_reason
             error_message = input_failure_reason
@@ -4846,22 +4863,18 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
             baseline_menu_detected = wait_result.baseline_menu_detected
             response_incomplete = wait_result.response_incomplete
 
-            if _success_stage_enabled("after_answer", runtime.config):
-                (
-                    answer_screenshot_paths,
-                    after_answer_screenshot_path,
-                    after_answer_full_screenshot_path,
-                    after_answer_multi_page,
-                ) = _capture_answer_screenshots(
-                    page,
-                    context,
-                    test_case.id,
-                    runtime.current_case_timestamp,
-                    runtime.config,
-                    runtime.logger,
-                )
+            # Screenshots disabled — skip capture
 
             dom_payload = extract_dom_payload(context, None, question=test_case.question, scenario_meta=test_case)
+             
+            # Save the full container HTML log to reports/chat_context_<case_id>.html
+            try:
+                debug_html_path = Path("reports") / f"chat_context_{test_case.id}_{runtime.current_case_timestamp}.html"
+                save_html_fragment(context, debug_html_path)
+                runtime.logger.info("[DOM_DEBUG] Dumped chat context HTML to %s", debug_html_path)
+            except Exception as debug_err:
+                runtime.logger.warning("[DOM_DEBUG] Failed to dump chat context HTML: %s", debug_err)
+
             gate = _assess_dom_payload_acceptance(test_case, dom_payload)
             if response_incomplete:
                 runtime.logger.warning("[ANSWER][INCOMPLETE_RESPONSE_BLOCKED] DOM answer will not be accepted")
@@ -5051,16 +5064,7 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
                     fix_suggestion = gate["fix_suggestion"]
                     input_failure_category = gate["status"]
                     input_failure_reason = reason
-                    if not after_answer_screenshot_path:
-                        _, failure_after_answer = capture_named_artifact(
-                            page,
-                            context,
-                            test_case.id,
-                            "after_answer",
-                            runtime.config,
-                            case_failed=True,
-                        )
-                        after_answer_screenshot_path = failure_after_answer
+                    after_answer_screenshot_path = ""
             elif not answer_raw:
                 input_failure_category = "answer_not_extracted"
                 input_failure_reason = wait_result.reason or "No answer text extracted"
@@ -5074,16 +5078,7 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
                 reason = input_failure_reason
                 error_message = reason
                 fix_suggestion = CAPTURE_INVALID_FIX
-                if not after_answer_screenshot_path:
-                    _, failure_after_answer = capture_named_artifact(
-                        page,
-                        context,
-                        test_case.id,
-                        "after_answer",
-                        runtime.config,
-                        case_failed=True,
-                    )
-                    after_answer_screenshot_path = failure_after_answer
+                after_answer_screenshot_path = ""
             elif status == "passed":
                 reason = gate["reason"]
     except RuntimeError as exc:
@@ -5132,10 +5127,10 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
         error_message=error_message,
         run_mode=runtime.config.run_mode,
         fast_path_used=runtime.config.is_speed_mode and input_method_used in {"fill", "keyboard.type"},
-        full_screenshot_path=after_answer_full_screenshot_path or str(artifacts.fullpage_screenshot or ""),
-        chat_screenshot_path=after_answer_screenshot_path or str(artifacts.chatbox_screenshot or ""),
-        submitted_chat_screenshot_path=after_send_screenshot_path,
-        answered_chat_screenshot_path=after_answer_screenshot_path,
+        full_screenshot_path="",
+        chat_screenshot_path="",
+        submitted_chat_screenshot_path="",
+        answered_chat_screenshot_path="",
         video_path="",
         trace_path="",
         html_fragment_path=str(artifacts.html_fragment_path or runtime.latest_html_fragment_path or ""),
@@ -5150,9 +5145,9 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
         input_verified=input_verified,
         input_method_used=input_method_used,
         submit_method_used=submit_method_used,
-        opened_chat_screenshot_path=opened_chat_screenshot_path,
-        opened_full_screenshot_path=opened_full_screenshot_path,
-        opened_footer_screenshot_path=opened_footer_screenshot_path,
+        opened_chat_screenshot_path="",
+        opened_full_screenshot_path="",
+        opened_footer_screenshot_path="",
         open_method_used=open_method_used,
         sdk_status=sdk_status,
         availability_status=availability_status,
@@ -5178,18 +5173,18 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
         final_input_target_frame=final_input_target_frame,
         input_candidates_debug=input_candidates_debug,
         input_candidate_logs=input_candidate_logs,
-        before_send_screenshot_path=before_send_screenshot_path,
-        before_send_full_screenshot_path=before_send_full_screenshot_path,
-        after_send_screenshot_path=after_send_screenshot_path,
-        after_send_full_screenshot_path=after_send_full_screenshot_path,
-        after_answer_screenshot_path=after_answer_screenshot_path,
-        after_answer_full_screenshot_path=after_answer_full_screenshot_path,
+        before_send_screenshot_path="",
+        before_send_full_screenshot_path="",
+        after_send_screenshot_path="",
+        after_send_full_screenshot_path="",
+        after_answer_screenshot_path="",
+        after_answer_full_screenshot_path="",
         font_fix_applied=font_fix_applied,
         user_message_echo_verified=user_message_echo_verified,
         new_bot_response_detected=new_bot_response_detected,
         baseline_menu_detected=baseline_menu_detected,
-        answer_screenshot_paths=answer_screenshot_paths,
-        after_answer_multi_page=after_answer_multi_page,
+        answer_screenshot_paths=[],
+        after_answer_multi_page=False,
         structured_message_history_count=structured_message_history_count,
         fallback_diff_used=fallback_diff_used,
         question_repetition_detected=question_repetition_detected,
@@ -5206,5 +5201,6 @@ def run_single_case(page: Page, test_case: TestCase) -> ExtractedPair:
         message_history_clean=message_history_clean,
         removed_followups=removed_followups,
         noise_lines_removed=noise_lines_removed,
+        related_products=list(dom_payload.get("related_products", [])) if 'dom_payload' in locals() else [],
+        related_questions=list(dom_payload.get("related_questions", [])) if 'dom_payload' in locals() else [],
     )
-

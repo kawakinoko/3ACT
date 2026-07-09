@@ -228,15 +228,50 @@ def _coerce_eval_payload(payload: dict[str, Any]) -> EvalResult:
     if isinstance(raw_flags, list):
         for flag in raw_flags:
             _append_flag(flags, str(flag))
-    
-    correctness_score = _clip_score(float(fallback.get("correctness_score", 0.0)), 4.0)
-    relevance_score = _clip_score(float(fallback.get("relevance_score", 0.0)), 2.0)
-    completeness_score = _clip_score(float(fallback.get("completeness_score", 0.0)), 2.0)
-    clarity_score = _clip_score(float(fallback.get("clarity_score", 0.0)), 1.0)
-    groundedness_score = _clip_score(float(fallback.get("groundedness_score", 0.0)), 1.0)
-    
+
+    raw_correctness = float(fallback.get("correctness_score", 0.0))
+    raw_relevance = float(fallback.get("relevance_score", 0.0))
+    raw_completeness = float(fallback.get("completeness_score", 0.0))
+    raw_clarity = float(fallback.get("clarity_score", 0.0))
+    raw_groundedness = float(fallback.get("groundedness_score", 0.0))
+    llm_overall = float(fallback.get("overall_score", 0.0))
+
+    # Detect scale mismatch: LLM returned components on 0-1 fractional scale
+    # instead of the weighted sub-scales (0-4, 0-2, 0-2, 0-1, 0-1).
+    # Heuristic: if all components are ≤ 1.0 and overall_score > 1.5,
+    # the components are fractions — scale them to their sub-scale maxima.
+    raw_sum = raw_correctness + raw_relevance + raw_completeness + raw_clarity + raw_groundedness
+    max_possible = 4.0 + 2.0 + 2.0 + 1.0 + 1.0  # = 10.0
+    components_look_fractional = (
+        max(raw_correctness, raw_relevance, raw_completeness, raw_clarity, raw_groundedness) <= 1.0
+        and llm_overall > 1.5
+    )
+    if components_look_fractional:
+        # Scale each component proportionally to its sub-scale maximum.
+        raw_correctness = raw_correctness * 4.0
+        raw_relevance = raw_relevance * 2.0
+        raw_completeness = raw_completeness * 2.0
+        raw_clarity = raw_clarity * 1.0
+        raw_groundedness = raw_groundedness * 1.0
+
+    correctness_score = _clip_score(raw_correctness, 4.0)
+    relevance_score = _clip_score(raw_relevance, 2.0)
+    completeness_score = _clip_score(raw_completeness, 2.0)
+    clarity_score = _clip_score(raw_clarity, 1.0)
+    groundedness_score = _clip_score(raw_groundedness, 1.0)
+    computed_sum = _round_score(correctness_score + relevance_score + completeness_score + clarity_score + groundedness_score)
+
+    # Trust the LLM's overall_score when it is a valid 0-10 value and the
+    # computed component sum differs significantly (more than 0.5 apart).
+    # This prevents discarding a correct overall_score of e.g. 9.8 when
+    # the component sub-scale was misread.
+    if 0.0 <= llm_overall <= 10.0 and abs(llm_overall - computed_sum) > 0.5:
+        overall_score = _round_score(llm_overall)
+    else:
+        overall_score = computed_sum
+
     return EvalResult(
-        overall_score=_round_score(correctness_score + relevance_score + completeness_score + clarity_score + groundedness_score),
+        overall_score=overall_score,
         score_scale="0-10",
         evaluation_language="en",
         correctness_score=correctness_score,
@@ -252,6 +287,7 @@ def _coerce_eval_payload(payload: dict[str, Any]) -> EvalResult:
         fix_suggestion=str(fallback.get("fix_suggestion") or ""),
         flags=flags
     )
+
 
 def _apply_quality_guardrails(test_case: TestCase, pair: ExtractedPair, result: EvalResult) -> EvalResult:
     answer = _evaluation_answer(pair)

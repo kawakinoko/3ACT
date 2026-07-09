@@ -12,6 +12,7 @@ The result string format should look like below:
 The result will always be in english.
 All whitespace in the result should be converted to underscore(_).
 If there is no matching category&intention, or if it is not a question, the result is "etc".
+**Which means the result should not be empty!!**
 
 The following is the example of the results.
 Question: 갤럭시 S26 울트라의 디스플레이 크기와 카메라 구성 그리고 배터리 같은 핵심 사양을 알려주세요.
